@@ -13,8 +13,9 @@ import subprocess
 from subprocess import call
 from tempfile import mkstemp
 from shutil import move
-from os import fdopen, remove
+from os import fdopen, remove, system
 from time import sleep
+import RPi.GPIO as GPIO
 import threading
 
 WFBCSettingsFile = "/boot/openhd-settings-1.txt"
@@ -24,13 +25,35 @@ IPAndroidClient = ""
 IsPhoneThredRunning = 0
 
 ConfigResp = bytearray(b'ConfigResp')
+ConfigEnd = bytearray(b'ConfigRespConfigEnd=ConfigEnd')
 RequestAllSettings = bytearray(b'RequestAllSettings')
 RequestChangeSettings = bytearray(b'RequestChangeSettings')
 RequestChangeOSD = bytearray(b'RequestChangeOSD')
 RequestChangeJoystick = bytearray(b'RequestChangeJoystick')
 RequestChangeTxPower = bytearray(b'RequestChangeTxPower')
+RequestReboot = bytearray(b'RequestReboot')
+RequestShutdown = bytearray(b'RequestShutdown')
 
 wbc_settings_blacklist = [""]
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(20, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+input_state0 = GPIO.input(20)
+input_state1 = GPIO.input(21)
+
+if (input_state0 == False) and (input_state1 == False):
+    WFBCSettingsFile = "/boot/openhd-settings-4.txt"
+
+if (input_state0 == False) and (input_state1 == True):
+    WFBCSettingsFile = "/boot/openhd-settings-3.txt"
+
+if (input_state0 == True) and (input_state1 == False):
+    WFBCSettingsFile = "/boot/openhd-settings-2.txt"
+
+if (input_state0 == True) and (input_state1 == True):
+    WFBCSettingsFile = "/boot/openhd-settings-1.txt"
 
 
 def replace_OSD_config(LookFor, NewLine):
@@ -190,6 +213,8 @@ read_osd_settings(complete_response)
 read_joystick_settings(complete_response)
 
 def SendAllSettingToPhone():
+    global IPAndroidClient
+
     for te in complete_response['settings']:
         
         SendBuff = bytearray()
@@ -206,11 +231,11 @@ def SendAllSettingToPhone():
         ValueDataPayload = data.encode('utf-8')
         SendBuff.extend(ValueDataPayload)
 
-        global IPAndroidClient
         SendData(IPAndroidClient,SendBuff)
         print("v :", SendBuff)
         SendBuff.clear()
         sleep(0.02)
+    SendData(IPAndroidClient, ConfigEnd)
 
 def ConfirmSave(VarName):
     SendBuffSave = bytearray()
@@ -278,6 +303,13 @@ while True:
                 subprocess.check_call(['/usr/local/bin/txpower_atheros',  filter ])
         except Exception as e:
             print("TxPowerGround except: " + str(e) )
+        try:
+            if VariableNamAndData.startswith('HOTSPOT_TXPOWER=') == True:
+                splitResult = VariableNamAndData.split("=")
+                filter = re.sub("\D", "", splitResult[1])
+                subprocess.check_call(['/sbin/iw', "dev", "wifihotspot0", "set", "txpower", "fixed", filter ])
+        except Exception as e:
+            print("HOTSPOT_TXPOWER except: " + str(e) )
         ConfirmSave(VariableNameReport)
         complete_response = {}
         read_wbc_settings(complete_response)
@@ -350,6 +382,12 @@ while True:
         read_txpower_settings(complete_response)
         read_osd_settings(complete_response)
         read_joystick_settings(complete_response)
+    
+    if RequestReboot in data:
+        system('reboot')
+
+    if RequestShutdown in data:
+        system('shutdown -h -P now')
 
     print("received message:", data)
 
