@@ -67,6 +67,12 @@
 // IP or USB camera switch py script in
 #define PORT3 1259 
 
+typedef enum CARD_TYPE {
+    CARD_TYPE_RALINK,
+    CARD_TYPE_REALTEK,
+    CARD_TYPE_ATHEROS
+} CARD_TYPE;
+
 
 // Encrypted RC Message
 char messageRCEncrypt[40]; 
@@ -176,7 +182,7 @@ char *ifname = NULL;
 int flagHelp = 0;
 int sock = 0;
 int socks[5];
-int type[5];
+CARD_TYPE card_types[5];
 int counter = 0;
 int seqno = 0;
 
@@ -553,7 +559,7 @@ void sendRC(unsigned char seqno, telemetry_data_t *td) {
 
         // find out which card has best signal and ignore ralink (type=1) ones
         for (j = 0; j < ac; ++j) {
-            if ((best_dbm < td->rx_status->adapter[j].current_signal_dbm) && (type[j] != 0)) {
+            if ((best_dbm < td->rx_status->adapter[j].current_signal_dbm) && (card_types[j] != CARD_TYPE_RALINK)) {
                 best_dbm = td->rx_status->adapter[j].current_signal_dbm;
                 best_adapter = j;
                 //printf ("best_adapter: :%d\n",best_adapter);
@@ -561,31 +567,43 @@ void sendRC(unsigned char seqno, telemetry_data_t *td) {
         }
         
         if (NICCount == 1) {
-            if (type[0] == 2) {
-                if (write(socks[0], &framedatan, sizeof(framedatan)) < 0) {
-                    fprintf(stderr, "!");
-
-                    exit(1);
+            switch (card_types[0]) {
+                case CARD_TYPE_RALINK: {
+                    break;
                 }
-            } else {
-                if (write(socks[0], &framedatas, sizeof(framedatas)) < 0) {
-                    fprintf(stderr, "!");
-
-                    exit(1);
+                case CARD_TYPE_ATHEROS: {
+                    if (write(socks[0], &framedatas, sizeof(framedatas)) < 0) {
+                        fprintf(stderr, "!");
+                        exit(1);
+                    }
+                    break;
+                }
+                case CARD_TYPE_REALTEK: {
+                    if (write(socks[0], &framedatan, sizeof(framedatan)) < 0) {
+                        fprintf(stderr, "!");
+                        exit(1);
+                    }
+                    break;
                 }
             }
         } else {
-            if (type[best_adapter] == 2) {
-                if (write(socks[best_adapter], &framedatan, sizeof(framedatan)) < 0) {
-                    fprintf(stderr, "!");
-
-                    exit(1);
+            switch (card_types[best_adapter]) {
+                case CARD_TYPE_RALINK: {
+                    break;
                 }
-            } else {
-                if (write(socks[best_adapter], &framedatas, sizeof(framedatas)) < 0) {
-                    fprintf(stderr, "!");
-
-                    exit(1);
+                case CARD_TYPE_ATHEROS: {
+                    if (write(socks[best_adapter], &framedatas, sizeof(framedatas)) < 0) {
+                        fprintf(stderr, "!");
+                        exit(1);
+                    }
+                    break;
+                }
+                case CARD_TYPE_REALTEK: {
+                    if (write(socks[best_adapter], &framedatan, sizeof(framedatan)) < 0) {
+                        fprintf(stderr, "!");
+                        exit(1);
+                    }
+                    break;
                 }
             }
         }
@@ -761,8 +779,13 @@ int main(int argc, char *argv[]) {
     {
         auto search = openhd_settings.find("SecondaryCamera");
         if (search != openhd_settings.end() && (search->second == "USB" || search->second == "IP")) {
-            std::cout << "Enabling camera switcher for: " << search->second << std::endl;
-            IsIPCameraSwitcherEnabled = 1;
+            auto value = search->second;
+            boost::trim_right(value);
+
+            if ((value == "USB" || value == "IP")) {
+                std::cout << "Enabling camera switcher for: " << search->second << std::endl;
+                IsIPCameraSwitcherEnabled = 1;
+            }
         } else {
             std::cout << "Disabling camera switcher" << std::endl;
         }
@@ -770,9 +793,14 @@ int main(int argc, char *argv[]) {
 
     {
         auto search = openhd_settings.find("EncryptionOrRange");
-        if (search != openhd_settings.end() && (search->second == "Encryption")) {
-            std::cout << "Encrypted RC enabled" << std::endl;
-            IsEncrypt = 1;
+        if (search != openhd_settings.end()) {
+            auto value = search->second;
+            boost::trim_right(value);
+
+            if (value == "Encryption") {
+                std::cout << "Encrypted RC enabled" << std::endl;
+                IsEncrypt = 1;
+            }
         } else {
             std::cout << "Encrypted RC disabled" << std::endl;
         }
@@ -783,6 +811,7 @@ int main(int argc, char *argv[]) {
         if (search != openhd_settings.end() && (search->second != "0")) {
             std::cout << "PrimaryCardMAC: " << search->second << std::endl;
             PrimaryCardMAC = search->second;
+            boost::trim_right(PrimaryCardMAC);
         } else {
             std::cout << "PrimaryCardMAC disabled" << std::endl;
         }
@@ -901,11 +930,16 @@ int main(int argc, char *argv[]) {
             fgets(line, 100, procfile); 
             
             if (strncmp(line, "DRIVER=ath9k_htc", 16) == 0 ||
+                strncmp(line, "DRIVER=88x2bu",    13) == 0 ||
+                strncmp(line, "DRIVER=rtl88x2bu", 16) == 0 ||
+                strncmp(line, "DRIVER=8188eu",    13) == 0 ||
+                strncmp(line, "DRIVER=rtl8188eu", 16) == 0 ||
                (strncmp(line, "DRIVER=8812au", 13) == 0 ||
                 strncmp(line, "DRIVER=8814au", 13) == 0 ||
                 strncmp(line, "DRIVER=rtl8812au", 16) == 0 ||
                 strncmp(line, "DRIVER=rtl8814au", 16) == 0 ||
-                strncmp(line, "DRIVER=rtl88xxau", 16) == 0)) {
+                strncmp(line, "DRIVER=rtl88xxau", 16) == 0 ||
+                strncmp(line, "DRIVER=rtl88XXau", 16) == 0)) {
                 /*
                  * Atheros/Realtek
                  * 
@@ -913,11 +947,11 @@ int main(int argc, char *argv[]) {
                 if (strncmp(line, "DRIVER=ath9k_htc", 16) == 0) {
                     fprintf(stderr, "rctx: Atheros card detected\n");
 
-                    type[num_interfaces] = 1;
+                    card_types[num_interfaces] = CARD_TYPE_ATHEROS;
                 } else {
                     fprintf(stderr, "rctx: Realtek card detected\n");
 
-                    type[num_interfaces] = 2;
+                    card_types[num_interfaces] = CARD_TYPE_REALTEK;
                 }
             } else {
                 /*
@@ -926,7 +960,7 @@ int main(int argc, char *argv[]) {
                  */
                 fprintf(stderr, "rctx: Ralink card detected\n");
 
-                type[num_interfaces] = 0;
+                card_types[num_interfaces] = CARD_TYPE_RALINK;
             }
 
             socks[num_interfaces] = open_sock(interface.c_str());
@@ -949,6 +983,12 @@ int main(int argc, char *argv[]) {
     si_me.sin_family = AF_INET;
     si_me.sin_port = htons(InUDPPort);
     si_me.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+
 
     if (bind(s, (struct sockaddr *)&si_me, sizeof(si_me)) == -1) {
         fprintf(stderr, "Bind error. Exit");
@@ -1053,6 +1093,33 @@ int main(int argc, char *argv[]) {
     framedatas.dur2 =   0; // <-- duration
 
 
+
+    // init RSSI shared memory
+    telemetry_init(&td);
+
+
+    /*
+     * We need to prefill channels, since we have no values for them as
+     * long as the corresponding axis has not been moved yet
+     *
+     */
+    rcData = rc_channels_memory_open();
+    rcData[0] = axis0_initial;
+    rcData[1] = axis1_initial;
+    rcData[2] = axis2_initial;
+    rcData[3] = axis3_initial;
+    rcData[4] = axis4_initial;
+    rcData[5] = axis5_initial;
+    rcData[6] = axis6_initial;
+    rcData[7] = axis7_initial;
+    // Switches
+    rcData[8] = 0;
+
+
+    boost::thread t{udpInputThread};
+
+
+
     fprintf(stderr, "Waiting for joystick ...");
     
 
@@ -1069,26 +1136,6 @@ int main(int argc, char *argv[]) {
 
         usleep(100000);
     }
-
-
-    
-    rcData = rc_channels_memory_open();
-
-    /*
-     * We need to prefill channels, since we have no values for them as
-     * long as the corresponding axis has not been moved yet
-     *
-     */
-    rcData[0] = axis0_initial;
-    rcData[1] = axis1_initial;
-    rcData[2] = axis2_initial;
-    rcData[3] = axis3_initial;
-    rcData[4] = axis4_initial;
-    rcData[5] = axis5_initial;
-    rcData[6] = axis6_initial;
-    rcData[7] = axis7_initial;
-    // Switches
-    rcData[8] = 0;
     
 
     if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_VIDEO) != 0) {
@@ -1112,10 +1159,6 @@ int main(int argc, char *argv[]) {
         printf("\tHats: %i\n", SDL_JoystickNumHats(js));
     }
 
-    // init RSSI shared memory
-    telemetry_init(&td);
-
-    boost::thread t{udpInputThread};
 
     while (done) {
         done = eventloop_joystick();
@@ -1163,7 +1206,15 @@ void udpInputThread() {
     socklen_t slen = sizeof(si_other);
 
     while (udpThreadRun) {
-        if ((recv_len = recvfrom(s, buf, 21, 0, (struct sockaddr *)&si_other, &slen)) == -1) {
+        auto recv_len = recvfrom(s, buf, 21, 0, (struct sockaddr *)&si_other, &slen);
+
+        if (recv_len == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                usleep(50000);
+
+                continue;
+            }
+
             fprintf(stderr, "UDP recv error, closing thread. USB joystick will continue to function.");
 
             return;

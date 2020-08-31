@@ -13,8 +13,13 @@ RecvSocket = 0
 RetryCountMD5 = 15
 FileSizeInt = 0
 SettingsFilePath = "/boot/openhd-settings-1.txt"
-SwitchToFreq = "0"
-DefaultCommunicateFreq = "2412"
+
+WFBDefultFreq24="2412"
+WFBDefultFreq58="5180"
+
+SmartSyncFreqDefault24 = "2412"
+SmartSyncFreqDefault58 = "5180"
+SmartSyncFreqFromConfigFile="auto"
 
 SettingsFilePath = "/boot/openhd-settings-1.txt"
 TxPowerConfigFilePath="/etc/modprobe.d/ath9k_hw.conf"
@@ -194,12 +199,52 @@ def GetFreqFromConfig():
        return False
     return False
 
+def DetectWFBPrimaryBand():
+    rtl8812au = os.system('lsmod | grep 88XXau')
+    rtl8812au_newer = os.system('lsmod | grep 88xxau')
+    rtl8188eu = os.system('lsmod | grep 8188eu')
+    rtl8x12bu = os.system('lsmod | grep 88x2bu')
 
+    if rtl8812au == 0 or rtl8812au_newer == 0 or rtl8188eu == 0 or rtl8x12bu == 0:
+        return "58"
+    else:
+        return "24"
+
+def GetDefaultWFBFrequency():
+    WFBPrimaryBand = DetectWFBPrimaryBand()
+    if WFBPrimaryBand == "58":
+        return WFBDefultFreq58
+    elif WFBPrimaryBand == "24":
+        return WFBDefultFreq24
+    else:
+        # we have no way of knowing what to use because the supported bands aren't known
+        return WFBDefultFreq24
+
+def SelectSmartSyncFrequency():
+    WFBPrimaryBand = DetectWFBPrimaryBand()
+    try:
+        if not SmartSyncFreqFromConfigFile or "auto" in SmartSyncFreqFromConfigFile:
+            # either the file couldn't be read or the user still has auto chosen, so we pick for them
+            WFBPrimaryBand = DetectWFBPrimaryBand()
+            if WFBPrimaryBand == "58":
+                return SmartSyncFreqDefault58
+            elif WFBPrimaryBand == "24":
+                return SmartSyncFreqDefault24
+            else:
+                # we have no way of knowing what to use because the supported bands aren't known
+                return SmartSyncFreqDefault24
+        else:
+            # the user changed the smartsync frequency, we use it but they're on their own now
+            return SmartSyncFreqFromConfigFile
+    except Exception as e:
+       print(e)
+       return False
+    return False
 
 
 def StartSVPcomTx():                                     
     try: 
-        subprocess.Popen(['/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_tx', "-k", "1", "-n", "1", "-K", "/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/tx.key",  "-u" ,str(UDP_PORT_OUT), "-p", "92", "-B", "20", "-M", "0", WlanName ] )
+        subprocess.Popen(['/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_tx', "-k", "1", "-n", "1", "-K", "/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/tx.key",  "-u" ,str(UDP_PORT_OUT), "-p", "92", "-B", "20", "-M", "0", WlanName ] )
         return True
     except Exception as e:
         print(e)
@@ -209,16 +254,7 @@ def StartSVPcomTx():
 def StartSVPcomRx():   
     try:       
         
-        subprocess.Popen( ['/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_rx', "-k", "1", "-n", "1", "-K", "/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/rx.key",  "-c" ,"127.0.0.1", "-u", str(UDP_PORT_IN), "-p", "93",  WlanName ] )
-        return True
-    except Exception as e:
-        print(e)
-        return False
-    return False
-
-def StartConfigureWlanScript():   
-    try:       
-        subprocess.check_call(['/home/pi/RemoteSettings/Air/helper/ConfigureNicsAir.sh', SettingsFileDATARATE, DefaultCommunicateFreq, "single" ])
+        subprocess.Popen( ['/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_rx', "-k", "1", "-n", "1", "-K", "/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/rx.key",  "-c" ,"127.0.0.1", "-u", str(UDP_PORT_IN), "-p", "93",  WlanName ] )
         return True
     except Exception as e:
         print(e)
@@ -238,7 +274,8 @@ def FindWlanToUseAir():
                     WlanName = dir
         if WlanName != "0":
             print("Using WLAN with name: ", WlanName)
-            subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", DefaultCommunicateFreq ])
+            SmartSyncFreq = SelectSmartSyncFrequency()
+            subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", SmartSyncFreq ])
             return True
         else:
             return False
@@ -250,22 +287,23 @@ def FindWlanToUseAir():
 def ReturnWlanFreq():
     if WlanName != "0":
         try:
-            SettingsFileFREQ = "0"
+            SettingsFileFREQ = ""
             with open(SettingsFilePath, "r") as f:
                 lines = f.readlines()
                 for line in lines:
                     if line.startswith("FREQ=") == True:
                         SplitLines = line.split("=")
-                        FilterDigits = SplitLines[1]
-                        SettingsFileFREQ = re.sub("\D", "", FilterDigits)
+                        SettingsFileFREQ = SplitLines[1]
                         
-            if SettingsFileFREQ == "0":
+            if "auto" in SettingsFileFREQ or not SettingsFileFREQ:
+                WFBFreq = GetDefaultWFBFrequency()
                 #subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", "2472" ])
-                subprocess.check_call(['/home/pi/RemoteSettings/Air/SetWlanFreq.sh', WlanName , "2472" ])
-                print("Can`t read frequency from config file. Frequency set to: 2472")
+                subprocess.check_call(['/usr/local/share/RemoteSettings/Air/SetWlanFreq.sh', WlanName , WFBFreq ])
+                print("Using automatic WFB frequency: " + WFBFreq)
             else:
+                SettingsFileFREQ = re.sub("\D", "", SettingsFileFREQ)
                 #subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", SettingsFileFREQ ])
-                subprocess.check_call(['/home/pi/RemoteSettings/Air/SetWlanFreq.sh', WlanName , SettingsFileFREQ ])
+                subprocess.check_call(['/usr/local/share/RemoteSettings/Air/SetWlanFreq.sh', WlanName , SettingsFileFREQ ])
                 print("Frequency for WLAN: " + WlanName + " returned back to: " + SettingsFileFREQ)
 
             
@@ -278,6 +316,7 @@ def ReadSettingsFromConfigFile():
     global SettingsFileTXPOWER
     global SettingsFileTXMODE
 #   global SmartSync_StartupMode
+    global SmartSyncFreqFromConfigFile
 
     try:
         with open(SettingsFilePath, "r") as f:
@@ -302,6 +341,11 @@ def ReadSettingsFromConfigFile():
                     SplitLines = line.split("=")
                     FilterDigits = SplitLines[1]
                     SettingsFileTXMODE = re.sub("\D", "", FilterDigits)
+
+                if line.startswith("SmartSync_Frequency=") == True:
+                    SplitLines = line.split("=")
+                    FilterDigits = SplitLines[1]
+                    SmartSyncFreqFromConfigFile = re.sub("\D", "", FilterDigits) 
 
             return True
 
@@ -421,83 +465,79 @@ InitSettings()
 
 
 
-if StartConfigureWlanScript() != False:
-    if FindWlanToUseAir() != False:
-        if StartSVPcomRx() != False:
-            print("StartSVPcomRx")
-            if StartSVPcomTx() != False:
-                print("StartSVPcomTx")
-                InitUDPServer()
-                MD5CheckSumGround = RequestMd5FileSize()
-                if MD5CheckSumGround != False:
-                    MD5CheckSumAirCurrent = md5(SettingsFilePath)
-                    if MD5CheckSumGround == MD5CheckSumAirCurrent:
-                        print("Air and Ground config files equal. No need in sync")
-                        print("Notify ground that it can boot.")
-                        IsACK_RetryCounter = 0
-                        for i in range(0,15):
-                            IsACK = NotifyGroundWithACK("NoNeedInSync")
-                            if IsACK == True:
-                                CleanAndExit()
-                            sleep(0.1)
-                        CleanAndExit()
-                    else:
-                        print("Air and Ground config mismatch. Sync required")
-                        while True:
-                            InFileBuff = RequestSettingsFile()
-                            SaveFile(InFileBuff,"/tmp/infile.txt")
-                            InFileHash = md5("/tmp/infile.txt")
-                            print("InFileMD5: ", InFileHash)
-                            if InFileHash == MD5CheckSumGround:
-                                print("Ground and downloaded file checksum equal.")
-                                print("ACK received. Moving tmp file to /boot...")
-                                MoveFile()
-                                for x in range(0,15):
-                                    IsACK = NotifyGroundWithACK("DownloadFinished")
-                                    if IsACK == True:
-                                        print("ACK received. ready to boot")
-                                        CleanAndExit()
-                                        break
-                                CleanAndExit()
 
-                                #while True:
-                                #    IsACK = NotifyGroundWithACK("DownloadFinished")
-                                #    if IsACK == True:
-                                #        print("ACK received. Moving tmp file to /boot...")
-                                #        MoveFile()
-                                #        CleanAndExit()
-                                #    print("NotifyGroundWithACK failed. Retry...")
-                                #    IsACK_RetryCounter += 1
-                                #    if IsACK_RetryCounter % 2 == 0:
-                                #        if SwitchToFreq == "0":
-                                #            print("Reading freq from file...")
-                                #            SwitchToFreq = GetFreqFromConfig()
-                                #            if SwitchToFreq == False:
-                                #                print("Failed to read freq from settings file")
-                                #                SwitchToFreq = "0"
-                                #            else:
-                                #                print("Ground main frequency is: ", SwitchToFreq)
-                                #                print("switching to frequency: ", SwitchToFreq )
-                                #                SwitchWlanToFreq(SwitchToFreq)
-                                #
-                                #        else:
-                                #            print("switching to frequency: ", SwitchToFreq)
-                                #            SwitchWlanToFreq(SwitchToFreq)
-                                #
-                                #    else:
-                                #        print("switching to default frequency: ", DefaultCommunicateFreq)
-                                #        SwitchWlanToFreq(DefaultCommunicateFreq)
-
-                                #    sleep(1) #wait a bit between ACK request resend. 
-
-                                #break
-                            else:
-                                print("Downloaded file checksum not match to Ground. Retry...")
-
-
+if FindWlanToUseAir() != False:
+    if StartSVPcomRx() != False:
+        print("StartSVPcomRx")
+        if StartSVPcomTx() != False:
+            print("StartSVPcomTx")
+            InitUDPServer()
+            MD5CheckSumGround = RequestMd5FileSize()
+            if MD5CheckSumGround != False:
+                MD5CheckSumAirCurrent = md5(SettingsFilePath)
+                if MD5CheckSumGround == MD5CheckSumAirCurrent:
+                    print("Air and Ground config files equal. No need in sync")
+                    print("Notify ground that it can boot.")
+                    IsACK_RetryCounter = 0
+                    for i in range(0,15):
+                        IsACK = NotifyGroundWithACK("NoNeedInSync")
+                        if IsACK == True:
+                            CleanAndExit()
+                        sleep(0.1)
+                    CleanAndExit()
                 else:
-                    print("Failed to request ground MD5 config checksum. Current config file will be loaded.")
-else:
-    print("Faile to start /home/pi/RemoteSettings/Air/helper/ConfigureNicsAir.sh file")
+                    print("Air and Ground config mismatch. Sync required")
+                    while True:
+                        InFileBuff = RequestSettingsFile()
+                        SaveFile(InFileBuff,"/tmp/infile.txt")
+                        InFileHash = md5("/tmp/infile.txt")
+                        print("InFileMD5: ", InFileHash)
+                        if InFileHash == MD5CheckSumGround:
+                            print("Ground and downloaded file checksum equal.")
+                            print("ACK received. Moving tmp file to /boot...")
+                            MoveFile()
+                            for x in range(0,15):
+                                IsACK = NotifyGroundWithACK("DownloadFinished")
+                                if IsACK == True:
+                                    print("ACK received. ready to boot")
+                                    CleanAndExit()
+                                    break
+                            CleanAndExit()
+
+                            #while True:
+                            #    IsACK = NotifyGroundWithACK("DownloadFinished")
+                            #    if IsACK == True:
+                            #        print("ACK received. Moving tmp file to /boot...")
+                            #        MoveFile()
+                            #        CleanAndExit()
+                            #    print("NotifyGroundWithACK failed. Retry...")
+                            #    IsACK_RetryCounter += 1
+                            #    if IsACK_RetryCounter % 2 == 0:
+                            #        if SwitchToFreq == "0":
+                            #            print("Reading freq from file...")
+                            #            SwitchToFreq = GetFreqFromConfig()
+                            #            if SwitchToFreq == False:
+                            #                print("Failed to read freq from settings file")
+                            #                SwitchToFreq = "0"
+                            #            else:
+                            #                print("Ground main frequency is: ", SwitchToFreq)
+                            #                print("switching to frequency: ", SwitchToFreq )
+                            #                SwitchWlanToFreq(SwitchToFreq)
+                            #
+                            #        else:
+                            #            print("switching to frequency: ", SwitchToFreq)
+                            #            SwitchWlanToFreq(SwitchToFreq)
+                            #
+                            #    else:
+                            #        print("switching to default frequency: ", DefaultCommunicateFreq)
+                            #        SwitchWlanToFreq(DefaultCommunicateFreq)
+
+                            #    sleep(1) #wait a bit between ACK request resend. 
+
+                            #break
+                        else:
+                            print("Downloaded file checksum not match to Ground. Retry...")
+            else:
+                print("Failed to request ground MD5 config checksum. Current config file will be loaded.")
 
 CleanAndExit()

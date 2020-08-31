@@ -25,13 +25,13 @@ function tether_check_function {
             echo "USB tethering device detected. Configuring IP ..."
 
 
-            nice pump -h wifibrdcast -i usb0 --no-dns --keep-up --no-resolvconf --no-ntp || {
+            nice dhclient usb0 || {
                 echo "ERROR: Could not configure IP for USB tethering device!"
                 
                 nice killall wbc_status > /dev/null 2>&1
                 
                 if [ "$ENABLE_QOPENHD" == "Y" ]; then
-                    qstatus "ERROR: Could not configure IP for USB tethering device!" 5
+                    qstatus "ERROR: Could not configure IP for USB tethering device!" 3
                 else
                     wbc_status "ERROR: Could not configure IP for USB tethering device!" 7 55 0 &
                 fi
@@ -48,7 +48,7 @@ function tether_check_function {
             # the same data to all connected devices
             #
             PHONE_IP=`ip route show 0.0.0.0/0 dev usb0 | cut -d\  -f3`
-            /home/pi/RemoteSettings/dhcpeventThread.sh add $PHONE_IP &
+            /usr/local/share/RemoteSettings/dhcpeventThread.sh add $PHONE_IP &
 
 
             #

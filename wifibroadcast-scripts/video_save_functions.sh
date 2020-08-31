@@ -37,9 +37,14 @@ function MAIN_VIDEO_SAVE_FUNCTION {
                 FREETMPSPACE=`nice df -P /wbc_tmp/ | nice awk 'NR==2 {print $4}'`
 
                 if [ ${FREETMPSPACE} -lt ${LIMITFREE} ]; then
-                    echo "RAM disk full, killing cat video file writing  process ..."
+                    if [ "${ENABLE_QOPENHD}" == "Y" ]; then
+                        qstatus "Ground recording space full" 4
+                    else
+                        killall wbc_status > /dev/null 2>&1
+                        wbc_status "Ground recording space full" 7 65 0 &
+                    fi
                 
-                    ps -ef | nice grep "cat /root/videofifo3" | nice grep -v grep | awk '{print $2}' | xargs kill -9
+                    ps -ef | nice grep "cat /var/run/openhd/videofifo3" | nice grep -v grep | awk '{print $2}' | xargs kill -9
                     KILLED=1
                 fi
             fi
@@ -59,51 +64,27 @@ function save_function {
     # Let screenshot and check_alive function know that saving is in progress
     #
     touch /tmp/pausewhile
-    
+
+    SAVE_IDENTIFIER=$(date '+%Y-%m-%d-%H-%M-%S')
+    source /tmp/videofile
+
+     
 
     #
-    # Kill OSD so we can safely start wbc_status
-    #
-    ps -ef | nice grep "osd" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-    
-
-    #
-    # Kill video, telemetry recording, and local video display
-    #
-    ps -ef | nice grep "cat /root/videofifo3" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-    ps -ef | nice grep "cat /root/telemetryfifo3" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-
-
-    #
-    # Kill hello_video
-    #
-    ps -ef | nice grep "${DISPLAY_PROGRAM}" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-    ps -ef | nice grep "cat /root/videofifo1" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-
-
-
-    #
-    # Kill video receive process so that we aren't trying to save a video file that is still being
-    # written to
-    #
-    ps -ef | nice grep "rx -p 0" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-    ps -ef | nice grep "ftee /root/videofifo" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-
-
-    #
-    # Start replaying the video during save, but only if saving was enabled in the first place
-    #
-    if [ "${VIDEO_TMP}" != "none" ]; then
-        #
-        # Find out if video is on ramdisk or sd
-        #
-        source /tmp/videofile
-        echo "VIDEOFILE: ${VIDEOFILE}"
-
-        # start re-play of recorded video ....
-        # nice /opt/vc/src/hello_pi/hello_video/hello_video.bin.player ${VIDEOFILE} ${FPS} &
-        nice /rootfs/home/pi/wifibroadcast-hello_video/hello_video.bin.player ${VIDEOFILE} ${FPS} &
+    # Kill old OSD temporarily
+    #   
+    if [ "${ENABLE_QOPENHD}" != "Y" ]; then
+        systemctl stop osd
     fi
+    
+
+    #
+    # Stop saving the incoming video transmission while it is being copied to USB
+    #
+    ps -ef | nice grep "cat /var/run/openhd/videofifo3" | nice grep -v grep | awk '{print $2}' | xargs kill -9
+
+    # Stop saving the incoming telemetry stream while it is being copied to USB
+    ps -ef | nice grep "cat /var/run/openhd/telemetryfifo3" | nice grep -v grep | awk '{print $2}' | xargs kill -9
 
 
     #
@@ -113,13 +94,10 @@ function save_function {
 
 
     if [ "${ENABLE_QOPENHD}" == "Y" ]; then
-        qstatus "Saving to USB. This may take some time ..." 3
+        qstatus "Saving to USB..." 5
     else
-        wbc_status "Saving to USB. This may take some time ..." 7 55 0 &
+        wbc_status "Saving to USB..." 7 55 0 &
     fi
-
-
-    echo -n "Accessing file system.. "
 
     #
     # Some USB drives show up as sda1, others as sda, check for both in order (checking for sda first
@@ -132,52 +110,27 @@ function save_function {
     fi
 
 
-    echo "USBDEV: ${USBDEV}"
-
-
     if mount ${USBDEV} /media/usb; then
-        TELEMETRY_SAVE_PATH="telemetry"
-        SCREENSHOT_SAVE_PATH="screenshot"
-        VIDEO_SAVE_PATH="video"
-        RSSI_SAVE_PATH="rssi"
-
-
-        if [ -d "/media/usb/${RSSI_SAVE_PATH}" ]; then
-            echo "RSSI save path '${RSSI_SAVE_PATH}' found"
-        else
-            echo "Creating RSSI save path '${RSSI_SAVE_PATH}'"
-            mkdir /media/usb/${RSSI_SAVE_PATH}
-        fi
-
-
-        if [ -d "/media/usb/${TELEMETRY_SAVE_PATH}" ]; then
-            echo "Telemetry save path '${TELEMETRY_SAVE_PATH}' found"
-        else
-            echo "Creating Telemetry save path '${TELEMETRY_SAVE_PATH}'"
-            mkdir /media/usb/${TELEMETRY_SAVE_PATH}
-        fi
-
-
-        killall rssilogger
-        killall syslogger
-        killall wifibackgroundscan
+        killall rssilogger > /dev/null 2>&1
+        killall syslogger > /dev/null 2>&1
+        killall wifibackgroundscan > /dev/null 2>&1
 
 
         #
         # Create charts for the video and downstream telemetry
         # 
-        gnuplot -e "load '/root/gnuplot/videorssi.gp'" &
-        gnuplot -e "load '/root/gnuplot/videopackets.gp'"
-        gnuplot -e "load '/root/gnuplot/telemetrydownrssi.gp'" &
-        gnuplot -e "load '/root/gnuplot/telemetrydownpackets.gp'"
+        gnuplot -e "load '/usr/local/share/openhd/gnuplot/videorssi.gp'"
+        gnuplot -e "load '/usr/local/share/openhd/gnuplot/videopackets.gp'"
+        gnuplot -e "load '/usr/local/share/openhd/gnuplot/telemetrydownrssi.gp'"
+        gnuplot -e "load '/usr/local/share/openhd/gnuplot/telemetrydownpackets.gp'"
 
 
         #
         # Upstream telemetry was enabled, this creates a chart with the data
         #
         if [ "${TELEMETRY_UPLINK}" != "disabled" ]; then
-            gnuplot -e "load '/root/gnuplot/telemetryuprssi.gp'" &
-            gnuplot -e "load '/root/gnuplot/telemetryuppackets.gp'"
+            gnuplot -e "load '/usr/local/share/openhd/gnuplot/telemetryuprssi.gp'"
+            gnuplot -e "load '/usr/local/share/openhd/gnuplot/telemetryuppackets.gp'"
         fi
 
 
@@ -185,119 +138,128 @@ function save_function {
         # RC was in use, this creates a chart with the data
         #
         if [ "${RC}" != "disabled" ]; then
-            gnuplot -e "load '/root/gnuplot/rcrssi.gp'" &
-            gnuplot -e "load '/root/gnuplot/rcpackets.gp'"
+            gnuplot -e "load '/usr/local/share/openhd/gnuplot/rcrssi.gp'"
+            gnuplot -e "load '/usr/local/share/openhd/gnuplot/rcpackets.gp'"
         fi
 
 
         if [ "${DEBUG}" == "Y" ]; then
-            gnuplot -e "load '/root/gnuplot/wifibackgroundscan.gp'" &
+            gnuplot -e "load '/usr/local/share/openhd/gnuplot/wifibackgroundscan.gp'"
         fi
 
 
         #
         # Save all the raw chart data to the USB drive
         #
-        cp /wbc_tmp/*.csv /media/usb/${RSSI_SAVE_PATH}/
+        RSSI_SAVE_PATH="/media/usb/${SAVE_IDENTIFIER}/rssi"
+        mkdir -p ${RSSI_SAVE_PATH}
+
+        cp /wbc_tmp/*.csv ${RSSI_SAVE_PATH}/
+        cp /wbc_tmp/rssi/*.png ${RSSI_SAVE_PATH}/
 
 
         #
         # Save the telemetry data to the USB drive
         #
+        TELEMETRY_SAVE_PATH="/media/usb/${SAVE_IDENTIFIER}/telemetry"
+        mkdir -p ${TELEMETRY_SAVE_PATH}
+
         if [ -s "/wbc_tmp/telemetrydowntmp.raw" ]; then
-            cp /wbc_tmp/telemetrydowntmp.raw /media/usb/${TELEMETRY_SAVE_PATH}/telemetrydown`ls /media/usb/${TELEMETRY_SAVE_PATH}/*.raw | wc -l`.raw
-            cp /wbc_tmp/telemetrydowntmp.txt /media/usb/${TELEMETRY_SAVE_PATH}/telemetrydown`ls /media/usb/${TELEMETRY_SAVE_PATH}/*.txt | wc -l`.txt
+            cp /wbc_tmp/telemetrydowntmp.raw ${TELEMETRY_SAVE_PATH}/telemetrydown.raw
+            cp /wbc_tmp/telemetrydowntmp.txt ${TELEMETRY_SAVE_PATH}/telemetrydown.txt > /dev/null 2>&1
         fi
+
+        cp /wbc_tmp/telemetrydowndebug.txt ${TELEMETRY_SAVE_PATH}/telemetrydowndebug.txt > /dev/null 2>&1
+        cp /wbc_tmp/telemetryupdebug.txt ${TELEMETRY_SAVE_PATH}/telemetryupdebug.txt > /dev/null 2>&1
+
 
 
         #
         # Stop capturing packet data so the file can be saved to USB
         # 
-        killall tshark
+        killall tshark > /dev/null 2>&1
 
 
         #
         # Copy any captured packet data to the USB drive
         #
-        cp /wbc_tmp/*.pcap /media/usb/
-        cp /wbc_tmp/*.cap /media/usb/
+        CAP_SAVE_PATH="/media/usb/${SAVE_IDENTIFIER}/cap"
+        mkdir -p ${CAP_SAVE_PATH}
+        cp /wbc_tmp/*.pcap ${CAP_SAVE_PATH}/ > /dev/null 2>&1
+        cp /wbc_tmp/*.cap ${CAP_SAVE_PATH}/ > /dev/null 2>&1
 
         #
         # Copy the airodump chart to the USB drive
         #
-        cp /wbc_tmp/airodump.png /media/usb/
+        cp /wbc_tmp/airodump.png /media/usb/${SAVE_IDENTIFIER}/ > /dev/null 2>&1
 
 
         if [ "${ENABLE_SCREENSHOTS}" == "Y" ]; then
-            if [ -d "/media/usb/${SCREENSHOT_SAVE_PATH}" ]; then
-                echo "Screenshots save path '${SCREENSHOT_SAVE_PATH}' found"
-            else
-                echo "Creating screenshots save path '${SCREENSHOT_SAVE_PATH}'"
-                mkdir /media/usb/${SCREENSHOT_SAVE_PATH}
-            fi
-            
-            DIR_NAME_SCREENSHOT=/media/usb/${SCREENSHOT_SAVE_PATH}/`ls /media/usb/${SCREENSHOT_SAVE_PATH} | wc -l`
-            
-            mkdir ${DIR_NAME_SCREENSHOT}
-            cp /wbc_tmp/screenshot* ${DIR_NAME_SCREENSHOT} > /dev/null 2>&1
+            SCREENSHOT_SAVE_PATH="/media/usb/${SAVE_IDENTIFIER}/screenshot"
+
+            mkdir -p ${SCREENSHOT_SAVE_PATH}
+            cp /wbc_tmp/screenshot* ${SCREENSHOT_SAVE_PATH}/ > /dev/null 2>&1
         fi
 
         #
         # Only save video if the user enabled saving via memory or sdcard
         #
         if [ -s "${VIDEOFILE}" ] && [ "${VIDEO_TMP}" != "none" ]; then
+            VIDEO_SAVE_PATH="/media/usb/${SAVE_IDENTIFIER}/video"
 
-            if [ -d "/media/usb/${VIDEO_SAVE_PATH}" ]; then
-                echo "Video save path '${VIDEO_SAVE_PATH}' found"
-            else
-                echo "Creating video save path '${VIDEO_SAVE_PATH}'"
-                mkdir /media/usb/${VIDEO_SAVE_PATH}
-            fi
-
+            mkdir -p ${VIDEO_SAVE_PATH}
 
             if [ -z "${VIDEO_SAVE_FORMAT}" ]; then
                 VIDEO_SAVE_FORMAT=avi
             fi
             
 
-            USB_VIDEO_FILE=/media/usb/${VIDEO_SAVE_PATH}/video`ls /media/usb/${VIDEO_SAVE_PATH} | wc -l`.${VIDEO_SAVE_FORMAT}
-
-
-            echo "USB_VIDEO_FILE: ${USB_VIDEO_FILE}"
+            USB_VIDEO_FILE=${VIDEO_SAVE_PATH}/video.${VIDEO_SAVE_FORMAT}
 
 
             nice ffmpeg -framerate ${FPS} -i ${VIDEOFILE} -c:v copy ${USB_VIDEO_FILE} > /dev/null 2>&1 &
 
+            killall wbc_status > /dev/null 2>&1
 
             FFMPEGRUNNING=1
             while [ ${FFMPEGRUNNING} -eq 1 ]; do
                 FFMPEGRUNNING=`pidof ffmpeg | wc -w`
-                #echo "FFMPEGRUNNING: ${FFMPEGRUNNING}"
 
                 sleep 4
+        
+                if [ -f ${USB_VIDEO_FILE} ]; then
+                    ORIGINAL_FILE_SIZE=$(ls -l ${VIDEOFILE} | awk '{print $5}')
+                    TARGET_FILE_SIZE=$(ls -l ${USB_VIDEO_FILE} | awk '{print $5}')
+                    PERCENT_FINISHED=$(python -c "print(int(float(${TARGET_FILE_SIZE}) / float(${ORIGINAL_FILE_SIZE}) * 100.0))"  )
 
-                killall wbc_status > /dev/null 2>&1
-
-                if [ "${ENABLE_QOPENHD}" == "Y" ]; then
-                    qstatus "Saving - please wait ..." 3
-                else
-                    wbc_status "Saving - please wait ..." 7 65 0 &
+                    if [ "${ENABLE_QOPENHD}" == "Y" ]; then
+                        qstatus "Saving: ${PERCENT_FINISHED}% done" 5
+                    else
+                        killall wbc_status > /dev/null 2>&1
+                        wbc_status "Saving: ${PERCENT_FINISHED}% done" 7 65 0 &
+                    fi
                 fi
             done
         fi
         
+        killall wbc_status > /dev/null 2>&1
 
         #
         # Copy telemetry logs to the USB drive
         #
 
-        #cp /wbc_tmp/tracker.txt /media/usb/
-        cp /wbc_tmp/debug.txt /media/usb/
-        cp /wbc_tmp/telemetrydowndebug.txt /media/usb/${TELEMETRY_SAVE_PATH}/
-        cp /wbc_tmp/telemetryupdebug.txt /media/usb/${TELEMETRY_SAVE_PATH}/
+        #cp /wbc_tmp/tracker.txt /media/usb/${SAVE_IDENTIFIER}/
+        cp /wbc_tmp/debug.txt /media/usb/${SAVE_IDENTIFIER}/debug.txt > /dev/null 2>&1
 
+        sync
 
-        nice umount /media/usb
+        MOUNTED=`mount | grep /media/usb | wc -l`
+        while [ $MOUNTED -ge 1 ]; do
+            echo "Attempting to unmount USB drive"
+            umount -A /media/usb > /dev/null 2>&1
+            sleep 1
+            MOUNTED=`mount | grep /media/usb | wc -l`
+        done
 
         #
         # Inform the user that saving is done and the USB drive can be removed
@@ -307,7 +269,7 @@ function save_function {
             killall wbc_status > /dev/null 2>&1
 
             if [ "${ENABLE_QOPENHD}" == "Y" ]; then
-                qstatus "Done - USB memory stick can be removed now" 3
+                qstatus "Done - USB memory stick can be removed now" 5
             else
                 wbc_status "Done - USB memory stick can be removed now" 7 65 0 &
             fi
@@ -323,13 +285,14 @@ function save_function {
         # Stop any processes left over from the save step
         #
         killall wbc_status > /dev/null 2>&1
-        killall hello_video.bin.player > /dev/null 2>&1
 
         #
         # Clear out the temporary directories so we can start saving again
         #
         rm /wbc_tmp/* > /dev/null 2>&1
         rm /video_tmp/* > /dev/null 2>&1
+        rm /wbc_tmp/rssi/* > /dev/null 2>&1
+
         sync
     else
         STICKGONE=0
@@ -338,7 +301,7 @@ function save_function {
             killall wbc_status > /dev/null 2>&1
 
             if [ "${ENABLE_QOPENHD}" == "Y" ]; then
-                qstatus "ERROR: Could not access USB memory stick!" 5
+                qstatus "ERROR: Could not access USB memory stick!" 3
             else
                 wbc_status "ERROR: Could not access USB memory stick!" 7 65 0 &
             fi
@@ -354,7 +317,6 @@ function save_function {
         # Stop any processes left over from the save step
         #
         killall wbc_status > /dev/null 2>&1
-        killall hello_video.bin.player > /dev/null 2>&1
     fi
 
 
@@ -364,17 +326,36 @@ function save_function {
     # Re-start video recording
     #
     if [ "${VIDEO_TMP}" != "none" ]; then
-        ionice -c 3 nice cat /root/videofifo3 >> ${VIDEOFILE} &
+        ionice -c 3 nice cat /var/run/openhd/videofifo3 >> ${VIDEOFILE} &
     fi
 
     #
     # Re-start raw telemetry recording
     #
-    ionice -c 3 nice cat /root/telemetryfifo3 >> /wbc_tmp/telemetrydowntmp.raw &
+    ionice -c 3 nice cat /var/run/openhd/telemetryfifo3 >> /wbc_tmp/telemetrydowntmp.raw &
 
+
+    #
+    # Re-start rssi logging
+    #
+    nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_0 >> /wbc_tmp/videorssi.csv &
+    nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_1 >> /wbc_tmp/telemetrydownrssi.csv &
+    nice /usr/local/bin/syslogger /wifibroadcast_rx_status_sysair >> /wbc_tmp/system.csv &
+
+    if [ "$TELEMETRY_UPLINK" != "disabled" ]; then
+        nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_uplink >> /wbc_tmp/telemetryuprssi.csv &
+    fi
+
+    if [ "$RC" != "disabled" ]; then
+        nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_rc >> /wbc_tmp/rcrssi.csv &
+    fi
+
+    if [ "$DEBUG" == "Y" ]; then
+        nice /usr/local/bin/wifibackgroundscan $NICS >> /wbc_tmp/wifibackgroundscan.csv &
+    fi
 
     killall wbc_status > /dev/null 2>&1
-    OSDRUNNING=`pidof /tmp/osd | wc -w`
+    OSDRUNNING=`pidof /usr/local/bin/osd | wc -w`
 
 
     if [ ${OSDRUNNING}  -ge 1 ]; then
@@ -386,7 +367,7 @@ function save_function {
         # Re-start the OSD, we only do this for the old OSD because QOpenHD never stops
         #
         if [ "${ENABLE_QOPENHD}" != "Y" ]; then
-            /tmp/osd >> /wbc_tmp/telemetrydowntmp.txt &
+            systemctl start osd
         fi
     fi
     
@@ -394,4 +375,6 @@ function save_function {
     # Let screenshot function know that it can continue taking screenshots
     #
     rm /tmp/pausewhile
+
+    echo "USB save done"
 }

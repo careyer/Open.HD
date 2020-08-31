@@ -184,6 +184,7 @@ void usage(void) {
            "-d <rate>   Data rate to send frames with. Currently only supported with Ralink cards. Choose 6,12,18,24,36 Mbit\n"
            "-y <mode>   Transmission mode. 0 = send on all interfaces, 1 = send only on interface with best RSSI\n"
            "-z <debug>  Debug. 0 = disable debug output, 1 = enable debug output\n\n"
+           "-f <force>  Force data frames. 0 = disable, 1 = use data frames on realtek cards\n\n"
            "Example:\n"
            "  cat /dev/serial0 | tx_telemetry -c 0 -p 1 -r 1 -x 0 -d 24 -y 0 wlan0\n"
            "\n");
@@ -425,13 +426,14 @@ int main(int argc, char *argv[]) {
     int param_data_rate = 12;
     int param_transmission_mode = 0;
     int param_debug = 0;
+    int force_data = 0;
 
     /*
      * Data read from stdin
      */
     uint8_t buf[402];
 
-    uint8_t mavlink_message[263];
+    uint8_t mavlink_message[MAVLINK_MAX_PACKET_LEN];
 
     uint16_t len_msg = 0;
     uint32_t seqno = 0;
@@ -445,7 +447,7 @@ int main(int argc, char *argv[]) {
             {      0,           0,         0, 0 }
         };
 
-        int c = getopt_long(argc, argv, "h:c:p:r:x:d:y:z:", optiona, &nOptionIndex);
+        int c = getopt_long(argc, argv, "h:c:p:r:x:d:y:z:f:", optiona, &nOptionIndex);
         if (c == -1) {
             break;
         }
@@ -488,6 +490,10 @@ int main(int argc, char *argv[]) {
                 param_debug = atoi(optarg);
                 break;
             }
+            case 'f': {
+                force_data = atoi(optarg);
+                break;
+            }
             default: {
                 fprintf(stderr, "unknown switch %c\n", c);
                 usage();
@@ -519,11 +525,16 @@ int main(int argc, char *argv[]) {
         fgets(line, 100, procfile);
 
         if (strncmp(line, "DRIVER=ath9k_htc", 16) == 0 ||
+            strncmp(line, "DRIVER=88x2bu",    13) == 0 ||
+            strncmp(line, "DRIVER=rtl88x2bu", 16) == 0 ||
+            strncmp(line, "DRIVER=8188eu",    13) == 0 ||
+            strncmp(line, "DRIVER=rtl8188eu", 16) == 0 ||
            (strncmp(line, "DRIVER=8812au",    13) == 0 ||
             strncmp(line, "DRIVER=8814au",    13) == 0 ||
             strncmp(line, "DRIVER=rtl8812au", 16) == 0 ||
             strncmp(line, "DRIVER=rtl8814au", 16) == 0 ||
-            strncmp(line, "DRIVER=rtl88xxau", 16) == 0)) {
+            strncmp(line, "DRIVER=rtl88xxau", 16) == 0 ||
+            strncmp(line, "DRIVER=rtl88XXau", 16) == 0)) {
             
             /*
              * Atheros/Realtek
@@ -656,14 +667,23 @@ int main(int argc, char *argv[]) {
     headers_ralink_len = sizeof(u8aRadiotapHeader) + sizeof(u8aIeeeHeader_data_short);
 
     /*
-     * For Realtek use RTS frames
+     * For Realtek use RTS frames, unless override is set
      */
-
-    // radiotap header
-    memcpy(headers_Realtek, u8aRadiotapHeader80211n, sizeof(u8aRadiotapHeader80211n));
-     // ieee header
-    memcpy(headers_Realtek + sizeof(u8aRadiotapHeader80211n), u8aIeeeHeader_rts, sizeof(u8aIeeeHeader_rts));
-    headers_Realtek_len = sizeof(u8aRadiotapHeader80211n) + sizeof(u8aIeeeHeader_rts);
+    if (force_data == 1) {
+        fprintf(stderr, "force data frames");
+        // radiotap header
+        memcpy(headers_Realtek, u8aRadiotapHeader80211n, sizeof(u8aRadiotapHeader80211n));
+        // ieee header
+        memcpy(headers_Realtek + sizeof(u8aRadiotapHeader80211n), u8aIeeeHeader_data, sizeof(u8aIeeeHeader_data));
+        headers_Realtek_len = sizeof(u8aRadiotapHeader80211n) + sizeof(u8aIeeeHeader_data);
+    } else {
+        fprintf(stderr, "not forcing data frames");
+        // radiotap header
+        memcpy(headers_Realtek, u8aRadiotapHeader80211n, sizeof(u8aRadiotapHeader80211n));
+        // ieee header
+        memcpy(headers_Realtek + sizeof(u8aRadiotapHeader80211n), u8aIeeeHeader_rts, sizeof(u8aIeeeHeader_rts));
+        headers_Realtek_len = sizeof(u8aRadiotapHeader80211n) + sizeof(u8aIeeeHeader_rts);
+    }
 
     /*
      * Radiotap and ieee headers

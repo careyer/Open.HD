@@ -4,6 +4,28 @@ function tmessage {
     fi
 }
 
+function create_fifos {
+    if [ "$TTY" != "/dev/tty1" ]; then
+        return
+    fi
+    
+    mkdir -p /var/run/openhd
+    
+    mkfifo /var/run/openhd/videofifo1
+    mkfifo /var/run/openhd/videofifo2
+    mkfifo /var/run/openhd/videofifo3
+    mkfifo /var/run/openhd/videofifo4
+    mkfifo /var/run/openhd/telemetryfifo1
+    mkfifo /var/run/openhd/telemetryfifo2
+    mkfifo /var/run/openhd/telemetryfifo3
+    mkfifo /var/run/openhd/telemetryfifo4
+    mkfifo /var/run/openhd/telemetryfifo5
+    mkfifo /var/run/openhd/telemetryfifo6
+    mkfifo /var/run/openhd/mspfifo
+
+    touch /var/run/openhd/fifoready
+}
+
 
 function detect_os {
     source /etc/os-release
@@ -33,10 +55,13 @@ function start_microservices {
     if [ "$TTY" != "/dev/tty1" ]; then
         return
     fi
+    qstatus "Starting power microservice" 5
+
     systemctl start openhd_microservice@power
 
     # gpio service only runs on the air side
     if [ "${CAM}" -ge 1 ]; then 
+        qstatus "Starting GPIO microservice" 5
         systemctl start openhd_microservice@gpio
     fi
 }
@@ -57,8 +82,8 @@ function migration_helper {
     #
     # This is only a bandaid for people who have not updated their settings file yet, just to ensure that things work
     #
-    if [[ "${OPENHD_VERSION}" == "buster" ]]; then
-        export USBCamera=`echo ${USBCamera} | python3 -c 'import sys, re; s = sys.stdin.read(); s=re.sub("omxh264enc.+\s*\!", "videoconvert ! v4l2h264enc !", s); print(s);'`
+    if [[ "${OPENHD_VERSION}" == "buster" && "${USBCamera}" != "" ]]; then
+        export USBCamera=`echo ${USBCamera} | python3 -c 'import sys, re; s = sys.stdin.read(); s=re.sub("omxh264enc.+\s*\!", "v4l2h264enc !", s); print(s);'`
     fi
 }
 
@@ -76,83 +101,87 @@ function detect_hardware {
     case "$HARDWARE" in
         'a03111')
             ABLE_BAND=ag
-            MODEL=4b
+            MODEL=Pi4b
         ;;
         'b03111')
             ABLE_BAND=ag
-            MODEL=4b
+            MODEL=Pi4b
         ;;
         'b03112')
             ABLE_BAND=ag
-            MODEL=4b
+            MODEL=Pi4b
         ;;
         'c03111')
             ABLE_BAND=ag
-            MODEL=4b
+            MODEL=Pi4b
         ;;
         'c03112')
             ABLE_BAND=ag
-            MODEL=4b
+            MODEL=Pi4b
+        ;;
+        'd03114')
+            ABLE_BAND=ag
+            MODEL=Pi4b
         ;;
         '29020e0')
             ABLE_BAND=ag
-            MODEL=3a+
+            MODEL=Pi3a+
         ;;
         '2a02082')
             ABLE_BAND=g
-            MODEL=3b
+            MODEL=Pi3b
         ;;
         '2a22082')
             ABLE_BAND=g
-            MODEL=3b
+            MODEL=Pi3b
         ;;
         '2a32082')
             ABLE_BAND=g
-            MODEL=3b
+            MODEL=Pi3b
         ;;		
         '2a52082')
             ABLE_BAND=g
-            MODEL=3b
+            MODEL=Pi3b
         ;;	
         '2a020d3')
             ABLE_BAND=ag
-            MODEL=3b+
+            MODEL=Pi3b+
         ;;
         '2900092')
             ABLE_BAND=none
-            MODEL=Zero
+            MODEL=PiZero
         ;;
         '2900093')
             ABLE_BAND=none
-            MODEL=Zero
+            MODEL=PiZero
         ;;
         '29000c1')
             ABLE_BAND=ag
-            MODEL=ZeroW
+            MODEL=PiZeroW
         ;;
         '2920092')
             ABLE_BAND=none
-            MODEL=Zero
+            MODEL=PiZero
         ;;
         '2920093')
             ABLE_BAND=none
-            MODEL=Zero
+            MODEL=PiZero
         ;;
         '2a22042')
             ABLE_BAND=none
-            MODEL=2b
+            MODEL=Pi2b
         ;;
         '2a21041')
             ABLE_BAND=none
-            MODEL=2b
+            MODEL=Pi2b
         ;;
         '2a01041')
             ABLE_BAND=none
-            MODEL=2b
+            MODEL=Pi2b
         ;;
         '2a01040')
             ABLE_BAND=none
-            MODEL=2b
+            MODEL=Pi2b
         ;;
         *)
             ABLE_BAND=unknown
@@ -160,7 +189,66 @@ function detect_hardware {
         ;;
     esac
 
-    echo "Running on Pi $MODEL"
+    qstatus "Running on $MODEL system" 5
+
+    echo "Running on $MODEL system"
+}
+
+
+function detect_wfb_primary_band {
+    lsmod | grep 88XXau
+    grepRet=$?
+    if [[ $grepRet -eq 0 ]] ; then
+        export WFB_PRIMARY_BAND_58="1"
+        export WFB_PRIMARY_BAND_24="0"
+        echo "58" > /tmp/wfb_primary_band
+        return
+    fi
+
+    lsmod | grep 88xxau
+    grepRet=$?
+    if [[ $grepRet -eq 0 ]] ; then
+        export WFB_PRIMARY_BAND_58="1"
+        export WFB_PRIMARY_BAND_24="0"
+        echo "58" > /tmp/wfb_primary_band
+        return
+    fi
+
+    lsmod | grep 8188eu
+    grepRet=$?
+    if [[ $grepRet -eq 0 ]] ; then
+        export WFB_PRIMARY_BAND_58="0"
+        export WFB_PRIMARY_BAND_24="1"
+        echo "58" > /tmp/wfb_primary_band
+        return
+    fi
+
+    lsmod | grep 88x2bu
+    grepRet=$?
+    if [[ $grepRet -eq 0 ]] ; then
+        export WFB_PRIMARY_BAND_58="1"
+        export WFB_PRIMARY_BAND_24="0"
+        echo "58" > /tmp/wfb_primary_band
+        return
+    fi
+
+    # every other card we support is 2.4-only, so we default to 2.4
+    export WFB_PRIMARY_BAND_58="0"
+    export WFB_PRIMARY_BAND_24="1"
+    echo "24" > /tmp/wfb_primary_band
+}
+
+
+function auto_frequency_select {
+    if [[ "${WFB_PRIMARY_BAND_58}" == "1" ]]; then
+        if [[ "${FREQ}" == "auto" ]]; then
+            export FREQ="5180"
+        fi
+    else
+        if [[ "${FREQ}" == "auto" ]]; then
+            export FREQ="2412"
+        fi
+    fi
 }
 
 
@@ -272,9 +360,12 @@ function check_lifepowered_pi_attached {
     if [[ $grepRet -eq 0 ]] ; then
         export LIFEPO4WERED_PI="1"
 
-        echo "Detected LiFePO4wered Pi power hat"
-
         systemctl start lifepo4wered-daemon
+
+        if [ "$TTY" == "/dev/tty1" ]; then
+            echo "Detected LiFePO4wered Pi power hat"
+            qstatus "Detected LiFePO4wered Pi power hat" 5
+        fi
     else
         export LIFEPO4WERED_PI="0"
     fi
@@ -288,7 +379,10 @@ function check_hdmi_csi_attached {
     if [[ $grepRet -eq 0 ]] ; then
         export HDMI_CSI="1"
 
-        echo "Detected HDMI CSI input board"
+        if [ "$TTY" == "/dev/tty1" ]; then
+            echo "Detected HDMI CSI input board"
+            qstatus "Detected HDMI CSI input board" 5
+        fi
     else
         export HDMI_CSI="0"
     fi
@@ -309,11 +403,14 @@ function check_camera_attached {
             # Used by cameracontrolUDP.py to restrict video mode change
             #
             echo  "1" > /tmp/CameraNotDetected
+        else
+            qstatus "Detected ${CAM} official Raspberry Pi camera(s)" 5
         fi
 
 
         if [ -e /tmp/Air ]; then
             echo "force boot as Air via GPIO"
+            qstatus "Force boot as air" 5
             CAM="1"
         fi
 
@@ -334,6 +431,8 @@ function check_camera_attached {
                 rm /tmp/CameraNotDetected
 
                 CAM="1"
+
+                qstatus "Detected VEYE camera" 5
             else
                 echo  "0" > /tmp/cam
 
@@ -404,6 +503,7 @@ function read_config_file {
             source /tmp/settings.sh
         else
             echo "ERROR: openhd-settings file contains syntax error(s)!"
+            qstatus "ERROR: openhd-settings file contains syntax error(s)!" 3
 
             collect_errorlog
 
@@ -411,6 +511,7 @@ function read_config_file {
         fi
     else
         echo "ERROR: openhd-settings file not found!"
+        qstatus "ERROR: openhd-settings file not found!" 3
 
         collect_errorlog
         
@@ -536,21 +637,21 @@ function set_video_player_based_fps {
     if [ "$CAM" == "0" ]; then         
         if [ "$FPS" == "59.9" ]; then
 
-            DISPLAY_PROGRAM=/opt/vc/src/hello_pi/hello_video/hello_video.bin.48-mm
+            DISPLAY_PROGRAM=/usr/local/bin/hello_video.bin.48-mm
         else
             if [ "$FPS" -eq 30 ]; then
 
-                DISPLAY_PROGRAM=/opt/vc/src/hello_pi/hello_video/hello_video.bin.30-mm
+                DISPLAY_PROGRAM=/usr/local/bin/hello_video.bin.30-mm
             fi
 
             if [ "$FPS" -lt 60 ]; then
 
-                DISPLAY_PROGRAM=/opt/vc/src/hello_pi/hello_video/hello_video.bin.48-mm
+                DISPLAY_PROGRAM=/usr/local/bin/hello_video.bin.48-mm
             fi
             
             if [ "$FPS" -gt 60 ]; then
             
-                DISPLAY_PROGRAM=/opt/vc/src/hello_pi/hello_video/hello_video.bin.240-befi
+                DISPLAY_PROGRAM=/usr/local/bin/hello_video.bin.240-befi
             fi
         fi
     fi
@@ -703,7 +804,7 @@ function collect_debug {
 
     echo >>$DEBUGPATH/debug.txt
     echo >>$DEBUGPATH/debug.txt
-    nice cat /boot/openhd-settings-1.txt | egrep -v "^(#|$)" >> $DEBUGPATH/debug.txt
+    nice cat /boot/$CONFIGFILE | egrep -v "^(#|$)" >> $DEBUGPATH/debug.txt
     echo >>$DEBUGPATH/debug.txt
     echo >>$DEBUGPATH/debug.txt
     nice cat /boot/osdconfig.txt | egrep -v "^(//|$)" >> $DEBUGPATH/debug.txt
@@ -843,7 +944,7 @@ function collect_errorlog {
     echo >>/boot/errorlog.txt
     nice vcgencmd get_config int >>/boot/errorlog.txt
 
-    nice /home/pi/wifibroadcast-misc/raspi2png -p /boot/errorlog.png
+    nice /usr/bin/raspi2png -p /boot/errorlog.png
     echo >>/boot/errorlog.txt
     nice dmesg >>/boot/errorlog.txt
     echo >>/boot/errorlog.txt
@@ -855,7 +956,7 @@ function collect_errorlog {
 
     echo >>/boot/errorlog.txt
     echo >>/boot/errorlog.txt
-    nice cat /boot/openhd-settings-1.txt | egrep -v "^(#|$)" >> /boot/errorlog.txt
+    nice cat /boot/$CONFIGFILE | egrep -v "^(#|$)" >> /boot/errorlog.txt
     echo >>/boot/errorlog.txt
     echo >>/boot/errorlog.txt
     nice cat /boot/osdconfig.txt | egrep -v "^(//|$)" >> /boot/errorlog.txt
@@ -894,20 +995,20 @@ function wbclogger_function {
         #
         # Start saving Open.HD telemetry to the temporary area, so it can be copied to the USB drive after flight
         #
-        nice /home/pi/wifibroadcast-base/rssilogger /wifibroadcast_rx_status_0 >> /wbc_tmp/videorssi.csv &
-        nice /home/pi/wifibroadcast-base/rssilogger /wifibroadcast_rx_status_1 >> /wbc_tmp/telemetrydownrssi.csv &
-        nice /home/pi/wifibroadcast-base/syslogger /wifibroadcast_rx_status_sysair >> /wbc_tmp/system.csv &
+        nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_0 >> /wbc_tmp/videorssi.csv &
+        nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_1 >> /wbc_tmp/telemetrydownrssi.csv &
+        nice /usr/local/bin/syslogger /wifibroadcast_rx_status_sysair >> /wbc_tmp/system.csv &
 
         if [ "$TELEMETRY_UPLINK" != "disabled" ]; then
-            nice /home/pi/wifibroadcast-base/rssilogger /wifibroadcast_rx_status_uplink >> /wbc_tmp/telemetryuprssi.csv &
+            nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_uplink >> /wbc_tmp/telemetryuprssi.csv &
         fi
 
         if [ "$RC" != "disabled" ]; then
-            nice /home/pi/wifibroadcast-base/rssilogger /wifibroadcast_rx_status_rc >> /wbc_tmp/rcrssi.csv &
+            nice /usr/local/bin/rssilogger /wifibroadcast_rx_status_rc >> /wbc_tmp/rcrssi.csv &
         fi
 
         if [ "$DEBUG" == "Y" ]; then
-            nice /home/pi/wifibroadcast-base/wifibackgroundscan $NICS >> /wbc_tmp/wifibackgroundscan.csv &
+            nice /usr/local/bin/wifibackgroundscan $NICS >> /wbc_tmp/wifibackgroundscan.csv &
         fi
 
         sleep 365d
@@ -936,14 +1037,18 @@ function detect_nics {
 function prepare_nic {
     DRIVER=`cat /sys/class/net/$1/device/uevent | nice grep DRIVER | sed 's/DRIVER=//'`
     
-    if [ "$DRIVER" != "rt2800usb" ] && [ "$DRIVER" != "mt7601u" ] && [ "$DRIVER" != "ath9k_htc" ]; then
+    if [ "$DRIVER" != "rtl88xxau" ] && [ "$DRIVER" != "rtl88XXau" ] && [ "$DRIVER" != "rt2800usb" ] && [ "$DRIVER" != "mt7601u" ] && [ "$DRIVER" != "ath9k_htc" ]; then
         tmessage "WARNING: Unsupported or experimental wifi card: $DRIVER"
+        qstatus "WARNING: Unsupported or experimental wifi card: $DRIVER" 4
     fi
 
     case $DRIVER in
         *881[24]au)
-            DRIVER=rtl88xxau
-        ;;
+            DRIVER=rtl88XXau
+            ;;
+        rtl88xxau)
+            DRIVER=rtl88XXau
+            ;;
     esac
 
     tmessage -n "Setting up $1: "
@@ -953,6 +1058,7 @@ function prepare_nic {
         ifconfig $1 up || {
             echo
             echo "ERROR: Bringing up interface $1 failed!"
+            qstatus "ERROR: Bringing up interface $1 failed!" 3
             collect_errorlog
             sleep 365d
         }
@@ -967,6 +1073,7 @@ function prepare_nic {
             iw dev $1 set bitrates legacy-2.4 $UplinkSpeed || {
                 echo
                 echo "ERROR: Setting bitrate on $1 failed!"
+                qstatus "ERROR: Setting bitrate on $1 failed!" 3
                 
                 collect_errorlog
                 
@@ -990,6 +1097,7 @@ function prepare_nic {
                 iw dev $1 set bitrates legacy-2.4 $VIDEO_WIFI_BITRATE || {
                     echo
                     echo "ERROR: Setting bitrate on $1 failed!"
+                    qstatus "ERROR: Setting bitrate on $1 failed!" 3
 
                     collect_errorlog
                     
@@ -1011,6 +1119,7 @@ function prepare_nic {
         ifconfig $1 down || {
             echo
             echo "ERROR: Bringing down interface $1 failed!"
+            qstatus "ERROR: Bringing down interface $1 failed!" 3
 
             collect_errorlog
             
@@ -1023,6 +1132,7 @@ function prepare_nic {
         iw dev $1 set monitor none || {
             echo
             echo "ERROR: Setting monitor mode on $1 failed!"
+            qstatus "ERROR: Setting monitor mode on $1 failed!" 3
 
             collect_errorlog
             
@@ -1040,6 +1150,7 @@ function prepare_nic {
         ifconfig $1 up || {
             echo
             echo "ERROR: Bringing up interface $1 failed!"
+            qstatus "ERROR: Bringing up interface $1 failed!" 3
             
             collect_errorlog
 
@@ -1056,6 +1167,7 @@ function prepare_nic {
             iw dev $1 set freq $2 || {
                 echo
                 echo "ERROR: Setting frequency $2 MHz on $1 failed!"
+                qstatus "ERROR: Setting frequency $2 Mhz on $1 failed!" 3
 
                 collect_errorlog
                 
@@ -1069,7 +1181,7 @@ function prepare_nic {
     fi
 
 
-    if [ "$DRIVER" == "rt2800usb" ] || [ "$DRIVER" == "mt7601u" ] || [ "$DRIVER" == "rtl8192cu" ] || [ "$DRIVER" == "rtl88xxau" ]; then
+    if [ "$DRIVER" == "rt2800usb" ] || [ "$DRIVER" == "mt7601u" ] || [ "$DRIVER" == "rtl8192cu" ] || [ "$DRIVER" == "rtl88XXau" ] || [ "$DRIVER" == "rtl88x2bu" ] || [ "$DRIVER" == "8188eu" ] || [ "$DRIVER" == "rtl8188eu" ]; then
         #
         # Do not set the bitrate for Ralink, Mediatek, Realtek, those are handled through tx parameter
         #
@@ -1079,6 +1191,7 @@ function prepare_nic {
         iw dev $1 set monitor none || {
             echo
             echo "ERROR: Setting monitor mode on $1 failed!"
+            qstatus "ERROR: Setting monitor mode on $1 failed!" 3
 
             collect_errorlog
             
@@ -1093,6 +1206,7 @@ function prepare_nic {
         ifconfig $1 up || {
             echo
             echo "ERROR: Bringing up interface $1 failed!"
+            qstatus "ERROR: Bringing up interfce $1 failed!" 3
 
             collect_errorlog
             
@@ -1109,6 +1223,7 @@ function prepare_nic {
             iw dev $1 set freq $2 || {
                 echo
                 echo "ERROR: Setting frequency $2 MHz on $1 failed!"
+                qstatus "ERROR: Setting frequency $2 MHz on $1 failed!" 3
 
                 collect_errorlog
                 
@@ -1123,12 +1238,13 @@ function prepare_nic {
         #
         # Configure the interface with the power level supplied to this function as the 3rd argument
         #
-        if  [ "$DRIVER" == "rtl88xxau" -a -n "$3" ]; then
+        if  [ "$DRIVER" == "rtl88XXau" -a -n "$3" ]; then
             tmessage -n "TX power $3.. "
 
             iw dev $1 set txpower fixed $3 || {
                 echo
                 echo "ERROR: Setting TX power to $3 on $1 failed!"
+                qstatus "ERROR: Setting TX power to $3 on $1 failed!" 3
 
                 collect_errorlog
                 

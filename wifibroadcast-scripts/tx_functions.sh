@@ -1,18 +1,9 @@
 function tx_function {
     killall wbc_status > /dev/null 2>&1
 
-
-    #
-    # Fix for stereo pi on buster, the AWB algorithm has been changed in more recent pi firmware and for some reason
-    # that breaks stereo camera use. 
-    #
-    # Ref: https://github.com/raspberrypi/firmware/issues/1253
-    #
-    if [[ "${OPENHD_VERSION}" == "buster" ]]; then
-        echo "Applying hotfix for stereo pi cameras"
+    if [[ "${ENABLE_NEW_PI_AWB}" != "Y" ]]; then
         vcdbg set awb_mode 0
     fi
-
 
     if [ "$LTE" == "Y" ]; then
         source lte_functions.sh
@@ -37,21 +28,40 @@ function tx_function {
         #
         # Configure the camera's ISP parameters
         #
-        cd /usr/local/bin
-        /usr/local/bin/veye_mipi_i2c.sh -w -f wdrmode -p1 $IMX290_wdrmode > /tmp/imx290log
-        /usr/local/bin/veye_mipi_i2c.sh -w -f mirrormode -p1 $IMX290_mirrormode >> /tmp/imx290log
-        /usr/local/bin/veye_mipi_i2c.sh -w -f denoise -p1 $IMX290_denoise >> /tmp/imx290log
+        pushd /usr/local/share/veye-raspberrypi
+        /usr/local/share/veye-raspberrypi/veye_mipi_i2c.sh -w -f wdrmode -p1 $IMX290_wdrmode > /tmp/imx290log
+        /usr/local/share/veye-raspberrypi/veye_mipi_i2c.sh -w -f mirrormode -p1 $IMX290_mirrormode >> /tmp/imx290log
+        /usr/local/share/veye-raspberrypi/veye_mipi_i2c.sh -w -f denoise -p1 $IMX290_denoise >> /tmp/imx290log
+
+        if [ "${IMX290_lowlight}" != "" ]; then
+            /usr/local/share/veye-raspberrypi/veye_mipi_i2c.sh -w -f lowlight -p1 ${IMX290_lowlight} >> /tmp/imx290log
+        else
+            # turn it off by default to avoid framerate changing during flight
+            /usr/local/share/veye-raspberrypi/veye_mipi_i2c.sh -w -f lowlight -p1 0x00 >> /tmp/imx290log
+        fi
+
+        /usr/local/share/veye-raspberrypi/cs_mipi_i2c.sh -w -f imagedir -p1 $IMX307_imagedir >> /tmp/imx290log
+        /usr/local/share/veye-raspberrypi/cs_mipi_i2c.sh -w -f videofmt -p1 ${WIDTH} -p2 ${HEIGHT} -p3 ${FPS}
+        popd
     fi
 
 
     if [ "$LoadFlirDriver" == "Y" ]; then
         echo "FLIR enabled"
+        qstatus "FLIR enabled" 5
 
-        /home/pi/cameracontrol/LoadFlirDriver.sh &
+        /usr/local/share/cameracontrol/LoadFlirDriver.sh &
+    fi
+
+    if [ "$LoadSeekDriver" == "Y" ]; then
+        echo "Seek Thermal camera enabled"
+        qstatus "Seek Thermal camera enabled" 5
+
+        /usr/local/share/wifibroadcast-scripts/load_seek_thermal.sh &
     fi
 
 
-    /home/pi/wifibroadcast-base/sharedmem_init_tx
+    /usr/local/bin/sharedmem_init_tx
 
 
     if [ "$TXMODE" == "single" ]; then
@@ -90,6 +100,7 @@ function tx_function {
     detect_nics
 
     if [ "$Bandwidth" == "10" ]; then
+        qstatus "Using 10MHz channel bandwidth" 5
         echo "HardCode dirty code for tests only. Values are it Hex, to set 10MHz use 0xa (10 in dec)"
 
         echo 0xa > /sys/kernel/debug/ieee80211/phy0/ath9k_htc/chanbw
@@ -100,6 +111,7 @@ function tx_function {
     fi
 
     if [ "$Bandwidth" == "5" ]; then
+        qstatus "Using 5MHz channel bandwidth" 5
         echo "HardCode dirty code for tests only. Values are it Hex, to set 10MHz use 0xa (10 in dec)"
 
         echo 5 > /sys/kernel/debug/ieee80211/phy0/ath9k_htc/chanbw
@@ -140,7 +152,10 @@ function tx_function {
 
         case $DRIVER in
             *881[24]au)
-                DRIVER=rtl88xxau
+                DRIVER=rtl88XXau
+                ;;
+            rtl88xxau)
+                DRIVER=rtl88XXau
                 ;;
         esac
 
@@ -150,7 +165,7 @@ function tx_function {
             #
 
             VIDEO_FRAMETYPE=0
-            if [ "$DRIVER" == "rtl88xxau" ]; then
+            if [[ "$DRIVER" == "rtl88XXau" || "$DRIVER" == "rtl88x2bu" || "$DRIVER" == "rtl8188eu" || "$DRIVER" == "8188eu" ]]; then
                 if [ "$CTS_PROTECTION" != "Y" ] && [ "$UseMCS" == "1" ]; then
                     VIDEO_FRAMETYPE=2
                 else
@@ -187,8 +202,10 @@ function tx_function {
     DRIVER=`cat /sys/class/net/$NICS/device/uevent | nice grep DRIVER | sed 's/DRIVER=//'`
     case $DRIVER in
         *881[24]au)
-            DRIVER=rtl88xxau
+            DRIVER=rtl88XXau
         ;;
+        rtl88xxau)
+            DRIVER=rtl88XXau
     esac
 
 
@@ -199,33 +216,38 @@ function tx_function {
     if [ "$CTS_PROTECTION" == "auto" ] && [ "$DRIVER" == "ath9k_htc" ]; then
         echo -n "Checking for other wifi traffic ... "
 
-        WIFIPPS=`/home/pi/wifibroadcast-base/wifiscan $NICS`
+        WIFIPPS=`/usr/local/bin/wifiscan $NICS`
 
         echo -n "Detected WiFi packets per second:  $WIFIPPS"
 
         if [ "$WIFIPPS" != "0" ]; then
-            echo "Enabling CTS"
+            echo "Video CTS: enabled"
+            qstatus "Video CTS: enabled" 5
 
             VIDEO_FRAMETYPE=1
             TELEMETRY_CTS=1
             CTS=Y
         else
             echo "No wifi traffic detected, disabling CTS"
+            qstatus "No wifi traffic detected, disabling CTS" 5
 
             CTS=N
         fi
     else
         if [ "$CTS_PROTECTION" == "N" ]; then
-            echo "CTS Protection disabled in config"
+            echo "Video CTS: disabled"
+            qstatus "Video CTS: disabled" 5
 
             CTS=N
         else
-            if [ "$DRIVER" == "ath9k_htc" ] || [ "$DRIVER" == "rtl88xxau" ]; then
-                echo "CTS Protection enabled in config"
+            if [[ "$DRIVER" == "ath9k_htc" || "$DRIVER" == "rtl88XXau" || "$DRIVER" == "rtl88x2bu" ]]; then
+                echo "Video CTS: enabled"
+                qstatus "Video CTS: enabled" 5
 
                 CTS=Y
             else
-                echo "CTS Protection not supported!"
+                echo "Video CTS: not supported on ${DRIVER}"
+                qstatus "Video CTS: not supported on ${DRIVER}" 3
 
                 CTS=N
             fi
@@ -251,6 +273,9 @@ function tx_function {
             echo "  | Video Bitrate will be reduced to 1000kbit to reduce current consumption!                        |"
             echo "  ---------------------------------------------------------------------------------------------------"
             echo
+            
+            qstatus "ERROR: Undervoltage detected, check power supply" 3
+
             
             mount -o remount,rw /boot
             
@@ -288,6 +313,7 @@ function tx_function {
     if [[ "${HDMI_CSI}" == "1" && "${FPS}" == "30" ]]; then
 
         echo "Reducing video bitrate by half for HDMI CSI board @ 30fps"
+        qstatus "Reducing video bitrate by half for HDMI CSI board @ 30fps" 5
 
         BITRATE_PERCENT=$(python -c "print(${BITRATE_PERCENT}/2)")
 
@@ -306,25 +332,32 @@ function tx_function {
             echo "-----------------------------------------"
             echo "Running bandwidth measurement...         "
             echo "-----------------------------------------"
+
+            qstatus "Running bandwidth measurement..." 5
             
-            BANDWIDTH_MEASURED=$(cat /dev/zero | /home/pi/wifibroadcast-base/tx_rawsock -z 1 -p 77 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS)
+            BANDWIDTH_MEASURED=$(cat /dev/zero | /usr/local/bin/tx_rawsock -z 1 -p 77 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS)
             BANDWIDTH_MEASURED_KBIT=$(python -c "print(int(${BANDWIDTH_MEASURED} / 1000.0))")
             echo "Bandwidth available: ${BANDWIDTH_MEASURED_KBIT}Kbit/s"
+            qstatus "Bandwidth available: ${BANDWIDTH_MEASURED_KBIT}Kbit/s" 5
             
             FEC_SIZE=$(python -c "print(${VIDEO_BLOCKS} + ${VIDEO_FECS})")
             echo "Video/FEC ratio: ${VIDEO_BLOCKS}/${FEC_SIZE}"
+            qstatus "Video/FEC ratio: ${VIDEO_BLOCKS}/${FEC_SIZE}" 5
 
             AVAILABLE_VIDEO_BANDWIDTH=$(python -c "print(int(${BANDWIDTH_MEASURED} * (float(${VIDEO_BLOCKS}) / float(${FEC_SIZE}))))")
             AVAILABLE_VIDEO_BANDWIDTH_KBIT=$(python -c "print(int(float(${AVAILABLE_VIDEO_BANDWIDTH}) / 1000.0))")
             echo "Bandwidth available for video: ${AVAILABLE_VIDEO_BANDWIDTH_KBIT}Kbit/s"
+            qstatus "Bandwidth available for video: ${AVAILABLE_VIDEO_BANDWIDTH_KBIT}Kbit/s" 5
             
             BITRATE=$(python -c "print(int(${AVAILABLE_VIDEO_BANDWIDTH} * ${BITRATE_PERCENT} / 100.0))")
             BITRATE_KBIT=$(($BITRATE/1000))
             BITRATE_MEASURED_KBIT=$(($BANDWIDTH_MEASURED/1000))
 
             echo "Using average of $BITRATE_PERCENT% of available video bandwidth"
+            qstatus "Using average of $BITRATE_PERCENT% of available video bandwidth" 5
             echo "-----------------------------------------"
             echo "Final video bitrate: $BITRATE_KBIT kBit/s"
+            qstatus "Final video bitrate: $BITRATE_KBIT kBit/s" 5
             echo "-----------------------------------------"
         else
             BITRATE=$(python -c "print(int(${VIDEO_BITRATE}*1000*1000))")
@@ -332,6 +365,7 @@ function tx_function {
             BITRATE_MEASURED_KBIT=0
 
             echo "Using fixed $BITRATE_KBIT kBit/s video bitrate"
+            qstatus "Using fixed $BITRATE_KBIT kBit/s video bitrate" 5
         fi
     else
         BITRATE=$((1000*1000))
@@ -339,6 +373,7 @@ function tx_function {
         BITRATE_MEASURED_KBIT=2000
 
         echo "Using fixed $BITRATE_KBIT kBit/s video bitrate due to undervoltage!"
+        qstatus "Using fixed $BITRATE_KBIT kBit/s video bitrate due to undervoltage!" 5
     fi
 
     #
@@ -403,6 +438,7 @@ function tx_function {
     #
     if nice dmesg | nice grep -q over-current; then
         echo "ERROR: Over-current detected - potential power supply problems!"
+        qstatus  "ERROR: Over-current detected - potential power supply problems!" 3
 
         collect_errorlog
         sleep 365d
@@ -413,6 +449,7 @@ function tx_function {
     #
     if nice dmesg | nice grep -q disconnect; then
         echo "ERROR: USB disconnect detected - potential power supply problems!"
+        qstatus "ERROR: USB disconnect detected - potential power supply problems!" 3
 
         collect_errorlog
         sleep 365d
@@ -458,24 +495,29 @@ function tx_function {
     fi
 
 
-    /home/pi/RemoteSettings/Air/rssitx.sh &
+    /usr/local/share/RemoteSettings/Air/rssitx.sh &
 
     echo
-    echo "Starting transmission in $TXMODE mode, FEC $VIDEO_BLOCKS/$VIDEO_FECS/$VIDEO_BLOCKLENGTH: $WIDTH x $HEIGHT $FPS fps, video bitrate: $BITRATE_KBIT kBit/s, Keyframerate: $KEYFRAMERATE"
+    echo "Starting video TX, FEC $VIDEO_BLOCKS/$VIDEO_FECS/$VIDEO_BLOCKLENGTH: $WIDTH x $HEIGHT $FPS fps, video bitrate: $BITRATE_KBIT kBit/s, keyframe interval: $KEYFRAMERATE"
 
+    qstatus "Starting video TX" 5
+    qstatus "FEC: $VIDEO_BLOCKS/$VIDEO_FECS/$VIDEO_BLOCKLENGTH" 5
+    qstatus "Resolution: ${WIDTH}x${HEIGHT}@${FPS}" 5
+    qstatus "Video bitrate: $BITRATE_KBIT kBit/s, keyframe interval: $KEYFRAMERATE" 5
 
 
     if [ "$IsAudioTransferEnabled" == "1" ]; then
-        /home/pi/RemoteSettings/Air/AudioCapture.sh &
-        /home/pi/RemoteSettings/Air/AudioTX.sh &
+        qstatus "Audio enabled" 5
+        /usr/local/share/RemoteSettings/Air/AudioCapture.sh &
+        /usr/local/share/RemoteSettings/Air/AudioTX.sh &
     fi
 
     #
     # Start joystick processes
     #
     if [ "$EncryptionOrRange" == "Encryption" ]; then
-        /home/pi/RemoteSettings/Air/RxJoystick.sh &
-        /home/pi/RemoteSettings/Air/processUDP.sh &
+        /usr/local/share/RemoteSettings/Air/RxJoystick.sh &
+        /usr/local/share/RemoteSettings/Air/processUDP.sh &
     fi
 
     # 
@@ -483,10 +525,11 @@ function tx_function {
     #
     if [ "$RemoteSettingsEnabled" == "1" ]; then
         echo "RemoteSettings enabled"
+        qstatus "Remote settings enabled" 5
 
-        /home/pi/RemoteSettings/RemoteSettingsWFBC_UDP_Air.sh > /dev/null &
-        /home/pi/RemoteSettings/AirRSSI.sh &
-        /usr/bin/python3 /home/pi/RemoteSettings/RemoteSettingsAir.py &
+        /usr/local/share/RemoteSettings/RemoteSettingsWFBC_UDP_Air.sh > /dev/null &
+        /usr/local/share/RemoteSettings/AirRSSI.sh &
+        /usr/bin/python3 /usr/local/share/RemoteSettings/RemoteSettingsAir.py &
     else
         #
         # Check to see if RemoteSettings was enabled with a value other than 0/1/2, which we interpret
@@ -503,9 +546,9 @@ function tx_function {
             if [ "$RemoteSettingsEnabled" -ne "0" ] && [ "$RemoteSettingsEnabled" -ne "2" ]; then
                     echo "RemoteSettings enabled with timer"
 
-                    /home/pi/RemoteSettings/RemoteSettingsWFBC_UDP_Air.sh > /dev/null &
-                    /home/pi/RemoteSettings/AirRSSI.sh &
-                    /usr/bin/python3 /home/pi/RemoteSettings/RemoteSettingsAir.py $RemoteSettingsEnabled &
+                    /usr/local/share/RemoteSettings/RemoteSettingsWFBC_UDP_Air.sh > /dev/null &
+                    /usr/local/share/RemoteSettings/AirRSSI.sh &
+                    /usr/bin/python3 /usr/local/share/RemoteSettings/RemoteSettingsAir.py $RemoteSettingsEnabled &
             fi
         fi
     fi
@@ -539,10 +582,10 @@ function tx_function {
             CAMERA_PROGRAM="raspivid"
         fi
 
-        echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b \$1 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransferExteranlBitrate.sh
+        echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b \$1 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransferExteranlBitrate.sh
     else
 
-        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b \$1 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransferExteranlBitrate.sh
+        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b \$1 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransferExteranlBitrate.sh
     fi
 
     #
@@ -614,25 +657,25 @@ function tx_function {
         # duplicated and sent out through the LTE card as well.
         # 
         if [ "$LTE" == "Y" ]; then
-            echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | gst-launch-1.0 -v fdsrc !  tee name=splitter ! queue ! h264parse ! rtph264pay config-interval=10 pt=96 ! udpsink host=$ZT_IP port=8000 splitter. ! queue ! fdsink | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer.sh
+            echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | gst-launch-1.0 -v fdsrc !  tee name=splitter ! queue ! h264parse ! rtph264pay config-interval=10 pt=96 ! udpsink host=$ZT_IP port=8000 splitter. ! queue ! fdsink | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer.sh
         else
-            echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer.sh
+            echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer.sh
         fi
 
         #
         # Create the half/quarter bandwidth camera scripts, used for camera switching
         # 
-        echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_10 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_10.sh
-        echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_5 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_5.sh
+        echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_10 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_10.sh
+        echo "nice -n -9 ${CAMERA_PROGRAM} -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_5 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_5.sh
     else
 
         #
         # No pi camera was detected, but this is an air pi so we assume it's a VEYE camera that the GPU can't detect
         #
 
-        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer.sh
-        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_10 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_10.sh
-        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_5 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_5.sh
+        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer.sh
+        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_10 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_10.sh
+        echo "nice -n -9 /usr/local/bin/veye_raspivid -w $WIDTH -h $HEIGHT -fps $FPS -b $BITRATE_5 -g $KEYFRAMERATE -t 0 $EXTRAPARAMS_IMX290 -o - | nice -n -9 /usr/local/bin/tx_rawsock -p 0 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d $VIDEO_WIFI_BITRATE -M $UseMCS -S $UseSTBC -L $UseLDPC -y 0 $NICS" >> /dev/shm/startReadCameraTransfer_5.sh
     fi
 
 
@@ -671,11 +714,12 @@ function tx_function {
         CameraType="Secondary"
         
         if [ "$IsBandSwicherEnabled" != "1" ]; then
-            /home/pi/RemoteSettings/Air/TxBandSwitcher.sh &
+            /usr/local/share/RemoteSettings/Air/TxBandSwitcher.sh &
         fi
 
         if [ $SecondaryCamera == "No" ]; then
             echo "SecondaryCamera type is not selected, but RPi forced to boot as Air unit via GPIO. Camera type set to USB"
+            qstatus "Camera type set to USB" 5
             SecondaryCamera="USB"
         fi
     fi
@@ -684,7 +728,7 @@ function tx_function {
     # Start the 2nd camera, currently uses SVPCOM but will be switched to rawsock soon
     #
     if [ $SecondaryCamera != "No" ]; then
-        /home/pi/RemoteSettings/Air/TxSecondaryCamera.sh &
+        /usr/local/share/RemoteSettings/Air/TxSecondaryCamera.sh &
     fi
 
 
@@ -694,8 +738,9 @@ function tx_function {
     # Note: this is also the camera switching system, they reuse the same control code
     #
     if [ "$IsBandSwicherEnabled" == "1" ]; then
-        /home/pi/RemoteSettings/BandSwitcherAir.sh $SecondaryCamera  $BITRATE &
-        /usr/bin/python3 /home/pi/RemoteSettings/Air/MessageSorter.py &
+        qstatus "Starting band switcher" 5
+        /usr/local/share/RemoteSettings/BandSwitcherAir.sh $SecondaryCamera  $BITRATE &
+        /usr/bin/python3 /usr/local/share/RemoteSettings/Air/MessageSorter.py &
     fi
 
     #
@@ -720,7 +765,7 @@ function tx_function {
     #
     # Note: this is going to become part of the camera microservice soon
     #
-    /usr/bin/python /home/pi/cameracontrol/cameracontrolUDP.py -IsArduCameraV21 $IsArduCameraV21 -IsCamera1Enabled $IsCamera1Enabled -IsCamera2Enabled $IsCamera2Enabled -IsCamera3Enabled $IsCamera3Enabled -IsCamera4Enabled $IsCamera4Enabled  -Camera1ValueMin $Camera1ValueMin -Camera1ValueMax $Camera1ValueMax -Camera2ValueMin $Camera2ValueMin -Camera2ValueMax $Camera2ValueMax -Camera3ValueMin $Camera3ValueMin -Camera3ValueMax $Camera3ValueMax  -Camera4ValueMin $Camera4ValueMin -Camera4ValueMax $Camera4ValueMax -DefaultCameraId $DefaultCameraId -BitrateMeasured $BITRATE -SecondaryCamera $SecondaryCamera -CameraType $CameraType -WithoutNativeRPiCamera $WithoutNativeRPiCamera -DefaultBandWidthAth9k $Bandwidth
+    /usr/bin/python /usr/local/share/cameracontrol/cameracontrolUDP.py -IsArduCameraV21 $IsArduCameraV21 -IsCamera1Enabled $IsCamera1Enabled -IsCamera2Enabled $IsCamera2Enabled -IsCamera3Enabled $IsCamera3Enabled -IsCamera4Enabled $IsCamera4Enabled  -Camera1ValueMin $Camera1ValueMin -Camera1ValueMax $Camera1ValueMax -Camera2ValueMin $Camera2ValueMin -Camera2ValueMax $Camera2ValueMax -Camera3ValueMin $Camera3ValueMin -Camera3ValueMax $Camera3ValueMax  -Camera4ValueMin $Camera4ValueMin -Camera4ValueMax $Camera4ValueMax -DefaultCameraId $DefaultCameraId -BitrateMeasured $BITRATE -SecondaryCamera $SecondaryCamera -CameraType $CameraType -WithoutNativeRPiCamera $WithoutNativeRPiCamera -DefaultBandWidthAth9k $Bandwidth
 
 
     TX_EXITSTATUS=${PIPESTATUS[1]}
@@ -736,6 +781,7 @@ function tx_function {
      
         if [ "$TX_EXITSTATUS" != "0" ]; then    
             echo "ERROR: could not start tx or tx terminated!"
+            qstatus "ERROR: could not start tx or tx terminated!" 3
         fi
     
         collect_errorlog
@@ -743,6 +789,7 @@ function tx_function {
         sleep 365d
     else        
         echo "ERROR: Wifi card removed!"
+        qstatus "ERROR: Wifi card removed!" 3
         
         collect_errorlog
         

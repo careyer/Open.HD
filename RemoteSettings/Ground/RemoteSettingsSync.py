@@ -9,7 +9,21 @@ from sys import stdout
 from datetime import datetime
 import argparse
 import RPi.GPIO as GPIO
+from struct import *
 import threading
+
+from enum import Enum
+
+class SmartSyncState(Enum):
+    Initializing = 0
+    WaitingForTrigger = 1
+    WaitingForAir = 2
+    Transferring = 3
+    NotNeeded = 4
+    Finished = 5
+    Error = 6
+    Skipped = 7
+
 lock = threading.Lock()
 
 parser = argparse.ArgumentParser()
@@ -57,12 +71,28 @@ print(SettingsFilePath)
 
 UDP_PORT_OUT = 1376
 UDP_PORT_IN = 1375
-UDP_INFO_PORT_OUT=1379
+#
+# Goes to the status microservice
+#
+UDP_INFO_PORT_OUT=50000
+#
+# Used for OpenHDBoot at the moment
+#
+UDP_SMARTSYNC_STATE_PORT_OUT=50001
+
+
 RecvSocket = 0
 JoystickSettingsFilePath = "/boot/joyconfig.txt"
 IsMainScriptRunning = False
-DefaultCommunicateFreq = "2412"
-FreqFromConfigFile= "0"
+
+WFBDefultFreq24="2412"
+WFBDefultFreq58="5180"
+FreqFromConfigFile="auto"
+
+SmartSyncFreqDefault24 = "2412"
+SmartSyncFreqDefault58 = "5180"
+SmartSyncFreqFromConfigFile="auto"
+
 WlanName = "0"
 RC_Value = 0
 ExitRCThread = 0
@@ -87,6 +117,11 @@ AirToGroundACK = bytearray(b'AirToGroundACK')
 DownloadFinished = bytearray(b'DownloadFinished')
 NoNeedInSync = bytearray(b'NoNeedInSync')
 
+
+sockToAir = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sockToStatusMicroservice = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sockToOpenHDBoot = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
 def md5(fname):
     try:
         hash_md5 = hashlib.md5()
@@ -95,28 +130,37 @@ def md5(fname):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
     except Exception as e:
-       SendInfoToDisplay(e)
        return False
 
-sockToAir = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # UDP
+
 def SendData(MessageBuf):
     try:
         
         #sockToAir.sendto( bytes(MessageBuf,'utf-8'), ('127.0.0.1', UDP_PORT_OUT))
         sockToAir.sendto(MessageBuf, ('127.0.0.1', UDP_PORT_OUT))
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
 
-sockToAir = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # UDP
-def SendInfoToDisplay(MessageBuf):
+
+def SendInfoToDisplay(Level, MessageBuf):
     try:
         print(MessageBuf)
-        sockToAir.sendto( bytes(MessageBuf,'ascii'), ('127.0.0.1', UDP_INFO_PORT_OUT))
-        #sockToAir.sendto(MessageBuf, ('127.0.0.1', UDP_INFO_PORT_OUT))
+        msg = pack('B 50s', Level, MessageBuf.encode('utf-8'))
+        sockToStatusMicroservice.sendto(msg, ('127.0.0.1', UDP_INFO_PORT_OUT))
     except Exception as e:
         print(e)
         return False
+
+
+def SendSmartSyncState(State, Progress):
+    try:
+        GPIOState = GPIO.input(26)
+        msg = pack('i i i i i i i', State.value, Progress, SmartSyncRC_Channel, SmartSyncStayON_RC_Value, SmartSyncOFF_RC_Value, RC_Value, GPIOState)
+        sockToOpenHDBoot.sendto(msg, ('127.0.0.1', UDP_SMARTSYNC_STATE_PORT_OUT))
+    except Exception as e:
+        print(e)
+        return False
+
 
 def ReadFileFrom(offset, BytesToRead):
     try:
@@ -126,7 +170,6 @@ def ReadFileFrom(offset, BytesToRead):
         f.close()
         return text
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
 
 def GetPrimaryCardMAC_Config():
@@ -141,7 +184,6 @@ def GetPrimaryCardMAC_Config():
                     return result
 
     except Exception as e:
-       SendInfoToDisplay(e)
        return False
     return False
 
@@ -205,7 +247,7 @@ def ReadJoystickConfigFile():
         return  {'ROLL_AXIS':ROLL_AXIS, 'PITCH_AXIS':PITCH_AXIS ,'YAW_AXIS':YAW_AXIS,    'THROTTLE_AXIS':THROTTLE_AXIS, 'AUX1_AXIS':AUX1_AXIS ,'AUX2_AXIS':AUX2_AXIS,    'AUX3_AXIS':AUX3_AXIS, 'AUX4_AXIS':AUX4_AXIS }
 
     except Exception as e:
-       SendInfoToDisplay(e)
+       print(e)
 
     return False
 
@@ -217,14 +259,15 @@ def ReadSettingsFromConfigFile():
     global SmartSync_StartupMode
     global SmartSyncGround_Countdown
     global FreqFromConfigFile
+    global SmartSyncFreqFromConfigFile
+
     try:
         with open(SettingsFilePath, "r") as f:
             lines = f.readlines()
             for line in lines:
                 if line.startswith("FREQ=") == True:
                     SplitLines = line.split("=")
-                    FilterDigits = SplitLines[1]
-                    FreqFromConfigFile = re.sub("\D", "", FilterDigits) 
+                    FreqFromConfigFile = SplitLines[1]
 
                 if line.startswith("SmartSyncOFF_RC_Value") == True:
                     SplitLines = line.split("=")
@@ -251,12 +294,16 @@ def ReadSettingsFromConfigFile():
                     FilterDigits = SplitLines[1]
                     SmartSyncGround_Countdown = int(re.sub("\D", "", FilterDigits) )
                     
+                if line.startswith("SmartSync_Frequency=") == True:
+                    SplitLines = line.split("=")
+                    FilterDigits = SplitLines[1]
+                    SmartSyncFreqFromConfigFile = re.sub("\D", "", FilterDigits) 
 
             return True
 
 
     except Exception as e:
-       SendInfoToDisplay(e)
+       SendInfoToDisplay(3, "SmartSync: error occurred while reading settings file")
        return False
     return False
 
@@ -273,7 +320,6 @@ def FindWlanNameByMAC(PrimaryCardMAC):
                         return dir
 
     except Exception as e:
-       SendInfoToDisplay(e)
        return False
     return False
 
@@ -282,101 +328,98 @@ def FindWlanNameByMAC(PrimaryCardMAC):
 def FindWlanToUseGround():
     global WlanName
 
+    SmartSyncFreq = SelectSmartSyncFrequency()
+
     PrimaryCardMAC = GetPrimaryCardMAC_Config()
     if PrimaryCardMAC == False or PrimaryCardMAC == "0":
-        SendInfoToDisplay("Trying to init WLAN...")
+        SendInfoToDisplay(5, "SmartSync: trying to initialize WLAN...")
         try:
             for root, dirs, files in os.walk("/sys/class/net/"):
                 for dir in dirs:
                     if dir.startswith("eth") == False and  dir.startswith("lo") == False and  dir.startswith("usb") == False and  dir.startswith("intwifi") == False and  dir.startswith("relay") == False and dir.startswith("wifihotspot") == False:
-                        SendInfoToDisplay("Found WLan with name: " + dir)
+                        SendInfoToDisplay(5, "Found WLan with name: " + dir)
                         WlanName = dir
             if WlanName != "0":
-                SendInfoToDisplay("Using WLAN with name: " + WlanName)
-                subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", "2412" ])
-                SendInfoToDisplay("Frequency set to 2412")
+                SendInfoToDisplay(5, "SmartSync: using WLAN interface " + WlanName)
+                subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", SmartSyncFreq ])
+                SendInfoToDisplay(5, "SmartSync: frequency set to " + SmartSyncFreq)
                 return True
             else:
                 return False
 
         except Exception as e:
-            SendInfoToDisplay(e)
             return False
     else:
-        SendInfoToDisplay("Try to find wlan with MAC:" + PrimaryCardMAC)
+        SendInfoToDisplay(5, "SmartSync: trying to find wlan with MAC:" + PrimaryCardMAC)
         result = FindWlanNameByMAC(PrimaryCardMAC)
         if result != False:
-            SendInfoToDisplay("Wlan with MAC found ")
+            SendInfoToDisplay(5, "SmartSync: wlan with primary card MAC found ")
             try:
                 WlanName = result
-                SendInfoToDisplay("Using WLAN with name: " + WlanName)
-                subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", "2412" ])
-                SendInfoToDisplay("Frequency set to 2412")
+                SendInfoToDisplay(5, "SmartSync: using WLAN interface " + WlanName)
+                subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", SmartSyncFreq])
+                SendInfoToDisplay(5, "SmartSync: frequency set to " + SmartSyncFreq)
                 return True
             except Exception as e:
-                SendInfoToDisplay(e)
                 return False
         else:
-            SendInfoToDisplay("Wlan with MAC" + PrimaryCardMAC +  "not found, looking any other...")
+            SendInfoToDisplay(5, "SmartSync: wlan with MAC" + PrimaryCardMAC +  "not found, looking for another...")
             try:
                 for root, dirs, files in os.walk("/sys/class/net/"):
                     for dir in dirs:
                         if dir.startswith("eth") == False and  dir.startswith("lo") == False and  dir.startswith("usb") == False and  dir.startswith("intwifi") == False and  dir.startswith("relay") == False and dir.startswith("wifihotspot") == False:
-                            SendInfoToDisplay("Found WLan with name: " + dir)
+                            SendInfoToDisplay(5, "SmartSync: found WLan with name: " + dir)
                             WlanName = dir
                 if WlanName != "0":
-                    SendInfoToDisplay("Using WLAN with name: "  + WlanName)
-                    subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", "2412" ])
-                    SendInfoToDisplay("Frequency set to 2412")
+                    SendInfoToDisplay(5, "SmartSync: using WLAN interface "  + WlanName)
+                    subprocess.check_call(['/sbin/iw', "dev", WlanName , "set", "freq", SmartSyncFreq])
+                    SendInfoToDisplay(5, "SmartSync: frequency set to " + SmartSyncFreq)
                     return True
                 else:
                     return False
 
             except Exception as e:
-                SendInfoToDisplay(e)
                 return False
 
 #Not used. Can be used with ath9k driver reload.
 def InitWlan():
     global WlanName
+    SmartSyncFreq = SelectSmartSyncFrequency()
     PrimaryCardMAC = GetPrimaryCardMAC_Config()
     if PrimaryCardMAC == False or PrimaryCardMAC == "0":
-        SendInfoToDisplay("Trying to init wlan0...")
+        SendInfoToDisplay(5, "SmartSync: trying to initialize wlan0...")
         try:
             if os.path.isdir("/sys/class/net/wlan0") == True:
                 WlanName = "wlan0"
-                subprocess.check_call(['/home/pi/RemoteSettings/Ground/SetWlanXMonitorModeFreq.sh', "wlan0" ,"2412" ])
+                subprocess.check_call(['/usr/local/share/RemoteSettings/Ground/SetWlanXMonitorModeFreq.sh', "wlan0", SmartSyncFreq ])
                 return True
             else:
-                SendInfoToDisplay("wlan0 not found")
+                SendInfoToDisplay(3, "SmartSync: wlan0 not found")
                 return False
         except Exception as e:
-            SendInfoToDisplay(e)
             return False
     else:
-        SendInfoToDisplay("Try to configure wlan with MAC:" + PrimaryCardMAC)
+        SendInfoToDisplay(5, "SmartSync: configuring wlan with MAC: " + PrimaryCardMAC)
         result = FindWlanNameByMAC(PrimaryCardMAC)
         if result != False:
-            SendInfoToDisplay("Wlan name with MAC: " + result)
+            SendInfoToDisplay(5, "SmartSync: wlan name with MAC: " + result)
             try:
                 WlanName = result
-                subprocess.check_call(['/home/pi/RemoteSettings/Ground/SetWlanXMonitorModeFreq.sh', result ,"2412" ])
+                subprocess.check_call(['/usr/local/share/RemoteSettings/Ground/SetWlanXMonitorModeFreq.sh', result, SmartSyncFreq ])
                 return True
             except Exception as e:
-                SendInfoToDisplay(e)
                 return False
         else:
-            SendInfoToDisplay("Wlan with MAC not found, trying wlan0...")
+            SendInfoToDisplay(5, "SmartSync: wlan with primary card MAC not found, trying wlan0...")
             try:
                 if os.path.isdir("/sys/class/net/wlan0") == True:
                     WlanName = "wlan0"
-                    subprocess.check_call(['/home/pi/RemoteSettings/Ground/SetWlanXMonitorModeFreq.sh', "wlan0" ,"2412" ])
+                    subprocess.check_call(['/usr/local/share/RemoteSettings/Ground/SetWlanXMonitorModeFreq.sh', "wlan0", SmartSyncFreq ])
                     return True
                 else:
-                    SendInfoToDisplay("wlan0 not found")
+                    SendInfoToDisplay(3, "SmartSync: wlan0 not found")
                     return False
             except Exception as e:
-                SendInfoToDisplay(e)
                 return False
 
 def ShutDownWlan():
@@ -384,7 +427,6 @@ def ShutDownWlan():
         subprocess.check_call(['/bin/ip', "link" ,"set", WlanName, "down" ])
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
@@ -395,17 +437,16 @@ def IsWlanAth9k():
             lines = f.readlines()
             for line in lines:
                 if "ath9k_htc" in line:
-                    SendInfoToDisplay("Wlan is ath9k_htc. Driver reload required")
+                    SendInfoToDisplay(5, "SmartSync: wlan is ath9k_htc, driver reload required")
                     return True
         return False
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
 
 def UnloadAth9kDriver():
-    SendInfoToDisplay("Unload Ath9k_htc Driver...")
+    SendInfoToDisplay(5, "SmartSync: unload Ath9k_htc Driver...")
     try:
         subprocess.check_call(['rmmod', "ath9k_htc"  ])
         subprocess.check_call(['rmmod', "ath9k_common"  ])
@@ -413,12 +454,11 @@ def UnloadAth9kDriver():
         subprocess.check_call(['rmmod', "ath"  ])
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
 def LoadAth9kDriver():
-    SendInfoToDisplay("Load Ath9k_htc Driver...")
+    SendInfoToDisplay(5, "SmartSync: load Ath9k_htc Driver...")
     try:
         subprocess.check_call(['modprobe', "ath9k_htc"  ])
         subprocess.check_call(['modprobe', "ath9k_common"  ])
@@ -426,7 +466,6 @@ def LoadAth9kDriver():
         subprocess.check_call(['modprobe', "ath"  ])
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
@@ -437,7 +476,6 @@ def CreateFinishMarkFile():
         f.close()
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
@@ -449,28 +487,65 @@ def InitDevNull():
         RCDevNull = open(os.devnull, 'w')
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
+        return False
     return False
+
+def DetectWFBPrimaryBand():
+    ret = os.system('lsmod | grep 88XXau')
+    if ret == 0:
+        return "58"
+    else:
+        return "24"
+
+def GetDefaultWFBFrequency():
+    WFBPrimaryBand = DetectWFBPrimaryBand()
+    if WFBPrimaryBand == "58":
+        return WFBDefultFreq58
+    elif WFBPrimaryBand == "24":
+        return WFBDefultFreq24
+    else:
+        # we have no way of knowing what to use because the supported bands aren't known
+        return WFBDefultFreq24
+
+def SelectSmartSyncFrequency():
+    WFBPrimaryBand = DetectWFBPrimaryBand()
+    try:
+        if not SmartSyncFreqFromConfigFile or "auto" in SmartSyncFreqFromConfigFile:
+            # either the file couldn't be read or the user still has auto chosen, so we pick for them
+            WFBPrimaryBand = DetectWFBPrimaryBand()
+            if WFBPrimaryBand == "58":
+                return SmartSyncFreqDefault58
+            elif WFBPrimaryBand == "24":
+                return SmartSyncFreqDefault24
+            else:
+                # we have no way of knowing what to use because the supported bands aren't known
+                return SmartSyncFreqDefault24
+        else:
+            # the user changed the smartsync frequency, we use it but they're on their own now
+            return SmartSyncFreqFromConfigFile
+    except Exception as e:
+       print(e)
+       return False
+    return False
+
 
 def StartSVPcomTx():                                     
     try:                                     
-        subprocess.Popen(['/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_tx',"-k", "1", "-n", "1",
-                          "-K", "/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/tx.key",
+        subprocess.Popen(['/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_tx',"-k", "1", "-n", "1",
+                          "-K", "/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/tx.key",
                           "-u" ,str(UDP_PORT_OUT), "-p", "93", "-B", "20", "-M", "0", WlanName ])
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
 def StartSVPcomRx():   
     try:                                     
-        subprocess.Popen( ['/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_rx', "-k", "1", "-n", "1",
-                               "-K", "/home/pi/cameracontrol/IPCamera/svpcom_wifibroadcast/rx.key",
+        subprocess.Popen( ['/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/wfb_rx', "-k", "1", "-n", "1",
+                               "-K", "/usr/local/share/cameracontrol/IPCamera/svpcom_wifibroadcast/rx.key",
                               "-c" ,"127.0.0.1", "-u", str(UDP_PORT_IN), "-p", "92",  WlanName ], stdout=RxDevNull)
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
@@ -486,7 +561,7 @@ def StartRC_Reader(ChannelToRead):
 
     result = ReadJoystickConfigFile()
     if result == False:
-        SendInfoToDisplay("Can`t read joystick config file. Joystick - default.")
+        SendInfoToDisplay(4, "SmartSync: can`t read joystick config file, using defaults")
     else:
 
         ROLL_AXIS = result['ROLL_AXIS']
@@ -500,16 +575,15 @@ def StartRC_Reader(ChannelToRead):
 
     try:
         if ChannelToRead > 16:
-            SendInfoToDisplay("Selected RC channel greater than 16.  Forced to channel 1")
+            SendInfoToDisplay(4, "SmartSync: selected RC channel greater than 16.  Forced to channel 1")
             ChannelToRead = 1
         if ChannelToRead < 1:
-           SendInfoToDisplay("Selected RC channel less than 1.  Forced to channel 1")
+           SendInfoToDisplay(4, "SmartSync: selected RC channel less than 1.  Forced to channel 1")
            ChannelToRead = 1
 
-        subprocess.Popen( ['/home/pi/RemoteSettings/Ground/helper/JoystickSender', str(ChannelToRead), ROLL_AXIS, PITCH_AXIS,YAW_AXIS, THROTTLE_AXIS,AUX1_AXIS,AUX2_AXIS,AUX3_AXIS,AUX4_AXIS ], stdout=RCDevNull)
+        subprocess.Popen( ['/usr/local/share/RemoteSettings/Ground/helper/JoystickSender', str(ChannelToRead), ROLL_AXIS, PITCH_AXIS,YAW_AXIS, THROTTLE_AXIS,AUX1_AXIS,AUX2_AXIS,AUX3_AXIS,AUX4_AXIS ], stdout=RCDevNull)
         return True
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
     return False
 
@@ -522,10 +596,10 @@ def IsTimeToExitByTimer():
                 if LastRequestTime != 0:
                     diffLastRequest = (TimeNow - LastRequestTime).total_seconds()
                     if NotBreakByTimerIfLastRequestWas > diffLastRequest:
-                        SendInfoToDisplay("Sync in progress.... Timer - delayed.")
+                        SendInfoToDisplay(5, "SmartSync: in progress.... timer delayed.")
                         return False
                     
-                SendInfoToDisplay("Program interrupted by RC timer")
+                SendInfoToDisplay(4, "SmartSync: interrupted by RC timer")
                 return True
     return False
 
@@ -534,7 +608,7 @@ def IsTimeToExitByTimeout():
         TimeNow = datetime.now()
         diffLastRequest = (TimeNow - LastRequestTime).total_seconds()
         if diffLastRequest > NotBreakByTimerIfLastRequestWas:
-            SendInfoToDisplay("Timeout.")
+            SendInfoToDisplay(4, "SmartSync: sync timeout")
             return True
     return False
 
@@ -543,14 +617,14 @@ def IsTimeToExit():
     global ExitRCThread
 
     if RC_Value >= SmartSyncOFF_RC_Value and RC_Value != 0:
-        SendInfoToDisplay("Program interrupted by RC joystick")
+        SendInfoToDisplay(4, "SmartSync: interrupted by RC joystick")
         ExitRCThread = 1
         return True
     else:
         if SelectedControl == "GPIO":
             GPIOState = GPIO.input(26)
             if(GPIOState == True):
-                SendInfoToDisplay("Program interrupted by GPIO")
+                SendInfoToDisplay(4, "SmartSync: interrupted by GPIO")
                 ExitRCThread = 1
                 return True
 
@@ -558,7 +632,6 @@ def IsTimeToExit():
 
 def InitUDPServer():
     for i in range(0,10):
-        SendInfoToDisplay("SwitchToAwaiting")
         sleep(0.02)
 
     global RecvSocket
@@ -571,8 +644,8 @@ def InitUDPServer():
         RecvSocket.settimeout(0.5)
         RecvSocket.bind((UDP_IP, UDP_PORT_IN))
     except Exception as e:
-        SendInfoToDisplay(e)
         return False
+
     MessageBufFile =  bytearray()
     while True:
         try:
@@ -590,15 +663,12 @@ def InitUDPServer():
             data, addr = RecvSocket.recvfrom(200)
             if data == RequestGroundChecksum:
                 #SendMessage: 32 bytes md5 + 5 bytes file size
-                SendInfoToDisplay("RequestGroundChecksum")
                 LastRequestTime = datetime.now()
                 result = md5(SettingsFilePath)
                 if result != False:
 
                     md5Bytes = result.encode('ascii')
-                    SendInfoToDisplay("md5: " + str(md5Bytes ) )
                     SizeInBytesInt = os.path.getsize(SettingsFilePath)
-                    SendInfoToDisplay("File size in bytes:" + str(SizeInBytesInt) )
                     if SizeInBytesInt != 0:
                         MessageBufFile.extend(md5Bytes)
                         SizeInBytesString = str(SizeInBytesInt)
@@ -607,39 +677,38 @@ def InitUDPServer():
                         SendData(MessageBufFile)
                         MessageBufFile.clear()
             if RequestSFile in data:
-                SendInfoToDisplay("SwitchToDownload")
                 LastRequestTime = datetime.now()
                 #return: 6 bytes - offset that was read + data 1024 bytes or less
                 if len(data) > 13:
                     offset = data[13:len(data)]
-                    SendInfoToDisplay("Requested file from offset: " + str(offset ) )
                     offsetInt = int(offset)
-                    SendInfoToDisplay("OffsetInt: " + str(offsetInt) )
 
                     SizeInBytes = os.path.getsize(SettingsFilePath)
                     BytesTillEndOfFile = SizeInBytes - offsetInt
+
+                    Transferred = SizeInBytes - BytesTillEndOfFile
+                    PercentFinished = (float(Transferred) / float(SizeInBytes)) * 100.0
+                    
+                    SendInfoToDisplay(5, "SmartSync: transferred {:d}%".format(int(PercentFinished)))
+
+                    SendSmartSyncState(SmartSyncState.Transferring, int(PercentFinished))
 
                     headerStr =  '{:0>6}'.format(offsetInt)
                     header = headerStr.encode('ascii')
                     if BytesTillEndOfFile >= 1024:
                         MessageBufFile.extend(header)
-                        SendInfoToDisplay("Till end of file left more than 1024")
                         tmp = ReadFileFrom(offsetInt,1024)
-                        SendInfoToDisplay("Bytes read From file:" + str(len(tmp)) )
                         MessageBufFile.extend(tmp)
-                        SendInfoToDisplay("Total MessageBuf len: " + str( len(MessageBufFile) ))
                         SendData(MessageBufFile)
                         MessageBufFile.clear()
                     else:
                         MessageBufFile.extend(header)
-                        SendInfoToDisplay("Till end of file left: " + str(BytesTillEndOfFile) )
                         MessageBufFile.extend(ReadFileFrom(offsetInt,BytesTillEndOfFile))
                         SendData(MessageBufFile)
                         MessageBufFile.clear()
 
             if data == DownloadFinished:
                 LastRequestTime = datetime.now()
-                SendInfoToDisplay("DownloadFinished")
                 tmp = "ACK".encode('ascii')
                 for i in range(0,10):
                     SendData(tmp)
@@ -656,14 +725,16 @@ def InitUDPServer():
                 #    ShutDownWlan()
 
                 CreateFinishMarkFile()
-                SendInfoToDisplay("Starting main OpenHD shell script.")
+                SendInfoToDisplay(5, "SmartSync: finished")
+                SendSmartSyncState(SmartSyncState.Finished, 100)
                 CleanAndExit()
                 exit()
                 
 
             if data == NoNeedInSync:
                 LastRequestTime = datetime.now()
-                SendInfoToDisplay("NoNeedInSync")
+                SendInfoToDisplay(5, "SmartSync: no sync needed")
+                SendSmartSyncState(SmartSyncState.NotNeeded, 100)
                 tmp = "ACK".encode('ascii')
                 for i in range(0,10):
                     SendData(tmp)
@@ -680,14 +751,12 @@ def InitUDPServer():
                 #   ShutDownWlan()
 
                 CreateFinishMarkFile()
-                SendInfoToDisplay("Starting main OpenHD shell script.")
                 CleanAndExit()
                 exit()
 
 
         except Exception as e:
             pass
-            #SendInfoToDisplay(e)
 
     return False
 
@@ -710,31 +779,34 @@ def StartRCThreadIn():
             RC_Value = int.from_bytes( byteArr, byteorder='big')
             lock.release()
             if ExitRCThread == 1:
-                SendInfoToDisplay("RC thread exiting...")
                 break
         except:
             if ExitRCThread == 1:
-                SendInfoToDisplay("RC thread exiting...")
                 break
 
     RCSock.close()
-    SendInfoToDisplay("RC thread terminated")
 
 
 def ReturnWlanFreq():
-    if FreqFromConfigFile != "0" and WlanName != "0":
+    global FreqFromConfigFile
+    if WlanName != "0":
         try:
-            subprocess.check_call(['/home/pi/RemoteSettings/Ground/SetWlanFreq.sh', WlanName , FreqFromConfigFile ])
-            SendInfoToDisplay("Frequency for WLAN: " + WlanName + " returned back to: " + FreqFromConfigFile)
+            if not FreqFromConfigFile or "auto" in FreqFromConfigFile:
+                WFBFreq = GetDefaultWFBFrequency()
+                subprocess.check_call(['/usr/local/share/RemoteSettings/Ground/SetWlanFreq.sh', WlanName , WFBFreq ])
+                SendInfoToDisplay(5, "Using automatic WFB frequency: " + WFBFreq)
+            else:
+                FreqFromConfigFile = re.sub("\D", "", FreqFromConfigFile) 
+                subprocess.check_call(['/usr/local/share/RemoteSettings/Ground/SetWlanFreq.sh', WlanName , FreqFromConfigFile ])
+                SendInfoToDisplay(5, "SmartSync: setting  " + WlanName + " to: " + FreqFromConfigFile)
         except Exception as e:
-            SendInfoToDisplay(e)
+            SendInfoToDisplay(3, "SmartSync: error setting frequency to " + FreqFromConfigFile)
 
 def CleanAndExit():
     global ExitRCThread
     global RxDevNull
     global RCDevNull
 
-    SendInfoToDisplay("SmartSync done.")
     ExitRCThread = 1
     ReturnWlanFreq()
     sleep(1)
@@ -742,39 +814,32 @@ def CleanAndExit():
     try:
         subprocess.check_call(['/usr/bin/killall', "JoystickSender" ]) 
     except Exception as e:
-        SendInfoToDisplay(e)
+        pass
 
     try:
         subprocess.check_call(['/usr/bin/killall', "wfb_rx" ]) 
     except Exception as e:
-        SendInfoToDisplay(e)
+        pass
 
     try:
         subprocess.check_call(['/usr/bin/killall', "wfb_tx" ]) 
     except Exception as e:
-        SendInfoToDisplay(e)
+        pass
 
-    
-    try:
-        subprocess.check_call(['/usr/bin/killall', "DisplayProgram" ]) 
-    except Exception as e:
-        print(e)
-
-    
 
     RxDevNull.close()
     RCDevNull.close()
     exit()
 
 def ShowSettings():
-    SendInfoToDisplay(" ")
-    SendInfoToDisplay("SmartSyncOFF_RC_Value=" + str(SmartSyncOFF_RC_Value) )
-    SendInfoToDisplay("SmartSyncStayON_RC_Value=" + str(SmartSyncStayON_RC_Value) )
-    SendInfoToDisplay("SmartSyncRC_Channel=" + str(SmartSyncRC_Channel) )
-    SendInfoToDisplay("SmartSync_StartupMode=" + str(SmartSync_StartupMode) )
-    SendInfoToDisplay("SmartSyncGround_Countdown=" + str(SmartSyncGround_Countdown) )
-    SendInfoToDisplay("NotBreakByTimerIfLastRequestWas=" + str(NotBreakByTimerIfLastRequestWas) )
+    SendInfoToDisplay(5, "SmartSync: RC value to disable is " + str(SmartSyncOFF_RC_Value) )
+    SendInfoToDisplay(5, "SmartSync: RC value to enable is " + str(SmartSyncStayON_RC_Value) )
+    SendInfoToDisplay(5, "SmartSync: RC channel is " + str(SmartSyncRC_Channel) )
 
+    if SmartSync_StartupMode == 1:
+        SendInfoToDisplay(5, "SmartSync: using force wait for air mode")
+    else:
+        SendInfoToDisplay(5, "SmartSync: using RC/GPIO trigger mode")
 
 
 def ReadTxPowerAth9k_hw():
@@ -836,7 +901,6 @@ CheckTxPower()
 
 
 if os.path.isfile("/tmp/ReadyToGo") == True:
-    SendInfoToDisplay("No need to run second time")
     exit()
 
 InitDevNull()
@@ -844,12 +908,10 @@ InitDevNull()
 RC_UDP_IN_thread = threading.Thread(target=StartRCThreadIn)
 RC_UDP_IN_thread.start()
 
-SendInfoToDisplay("Parse config file...")
 if ReadSettingsFromConfigFile() == True:
-    SendInfoToDisplay("Completed without errors")
     ShowSettings()
 else:
-    SendInfoToDisplay("Completed with errors. Using default settings. Check ground config file.")
+    SendInfoToDisplay(3, "SmartSync: error reading settings, check config file")
     SmartSyncOFF_RC_Value=1700
     SmartSyncStayON_RC_Value=1400
     SmartSyncRC_Channel=3
@@ -860,55 +922,61 @@ else:
 
 StartRC_Reader(SmartSyncRC_Channel)
 
+SendInfoToDisplay(5, "SmartSync: initializing")
+
 if SmartSync_StartupMode != 1:
-    SendInfoToDisplay("SmartSync disabled. RC reader force checked On")
+    SendSmartSyncState(SmartSyncState.WaitingForTrigger, 0)
+
     for i in range(0, 10):
-        #SendInfoToDisplay("I is:", i, "RC value: ", RC_Value)
+        #SendInfoToDisplay(6, "SmartSync: I is:", i, "RC value: ", RC_Value)
         #stdout.write("\r RC value: "+  str(RC_Value) + " Retry: " + str(i) + " of 30")
         #stdout.flush()
-        SendInfoToDisplay(" RC value: "+  str(RC_Value) + " Retry: " + str(i) + " of 10")
+        SendInfoToDisplay(5, "SmartSync: RC value: "+  str(RC_Value) + " Retry: " + str(i) + " of 10")
         if RC_Value <= SmartSyncStayON_RC_Value and RC_Value != 0:
             SmartSync_StartupMode = 1
             SmartSyncGround_Countdown=0
-            SendInfoToDisplay("SmartSync forced to On via joystick")
-            SendInfoToDisplay("Timer disabled")
+            SendInfoToDisplay(5, "SmartSync: forced to sync due to joystick")
+            SendSmartSyncState(SmartSyncState.WaitingForAir, 0)
             break
         if RC_Value >= SmartSyncOFF_RC_Value and RC_Value != 0:
             SmartSync_StartupMode = 0
-            SendInfoToDisplay("SmartSync forced to Off via joystick")
+            SendInfoToDisplay(5, "SmartSync: forced to skip due to joystick")
+            SendSmartSyncState(SmartSyncState.Skipped, 100)
             break
         GPIOState = GPIO.input(26)
         if(GPIOState == False):
             SmartSync_StartupMode = 1
             SmartSyncGround_Countdown=0
-            SendInfoToDisplay("SmartSync forced to On via GPIO")
-            SendInfoToDisplay("Timer disabled")
+            SendInfoToDisplay(5, "SmartSync: forced to sync due to GPIO")
+            SendSmartSyncState(SmartSyncState.WaitingForAir, 0)
             break
 
         sleep(0.3)
 
 
 if SmartSync_StartupMode == 1:
-    SendInfoToDisplay("SmartSync init...")
+    SendSmartSyncState(SmartSyncState.WaitingForAir, 0)
+
     #if InitWlan() != False:
     if FindWlanToUseGround() != False:
         if StartSVPcomRx() != False:
             if StartSVPcomTx() != False:
                 if SmartSyncGround_Countdown > 5:
-                    SendInfoToDisplay("Starting timer...")
+                    SendInfoToDisplay(5, "SmartSync: starting timer")
                     StartTime = datetime.now()
-                else:
-                    SendInfoToDisplay("Timer set to less than 5 seconds. Disabled.")
-
                 InitUDPServer()
             else:
-                SendInfoToDisplay("Can`t init radio TX")
+                SendInfoToDisplay(3, "SmartSync: can't initialize radio TX")
+                SendSmartSyncState(SmartSyncState.Error, 0)
         else:
-            SendInfoToDisplay("Can`t init radio RX")
+            SendInfoToDisplay(3, "SmartSync: can't initialize radio RX")
+            SendSmartSyncState(SmartSyncState.Error, 0)
     
     else:
-        SendInfoToDisplay("Can`t init Wlan. Exit.")
+        SendInfoToDisplay(3, "SmartSync: can't initialize wlan interface")
+        SendSmartSyncState(SmartSyncState.Error, 0)
 else:
-    SendInfoToDisplay("SmartSync disabled.")
+    SendInfoToDisplay(4, "SmartSync: disabled")
+    SendSmartSyncState(SmartSyncState.Skipped, 100)
 
 CleanAndExit()

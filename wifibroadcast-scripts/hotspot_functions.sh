@@ -40,7 +40,7 @@ function hotspot_check_function {
 
     pause_while
 
-    nice cat /root/telemetryfifo5 > /dev/openhd_mavlink1 &
+    nice cat /var/run/openhd/telemetryfifo5 > /dev/openhd_mavlink1 &
     /usr/local/bin/mavlink-routerd -e 127.0.0.1:14550 /dev/openhd_mavlink2:115200 &
 
     #
@@ -50,13 +50,13 @@ function hotspot_check_function {
     #
 
     #if [ "$ETHERNET_HOTSPOT" == "Y" ] || [ "$WIFI_HOTSPOT" != "N" ]; then
-        /home/pi/wifibroadcast-scripts/UDPsplitterhelper.sh 9121 5621 ${VIDEO_UDP_PORT2} &  #Secondary video stream
-        /home/pi/wifibroadcast-scripts/UDPsplitterhelper.sh 9120 5620 ${VIDEO_UDP_PORT} &  #Main video stream
+        /usr/local/share/wifibroadcast-scripts/UDPsplitterhelper.sh 9121 5621 ${VIDEO_UDP_PORT2} &  #Secondary video stream
+        /usr/local/share/wifibroadcast-scripts/UDPsplitterhelper.sh 9120 5620 ${VIDEO_UDP_PORT} &  #Main video stream
 
         if [ "${FORWARD_STREAM}" == "rtp" ]; then
-            echo "ionice -c 1 -n 4 nice -n -5 cat /root/videofifo2 | nice -n -5 gst-launch-1.0 fdsrc ! h264parse ! rtph264pay pt=96 config-interval=5 ! udpsink port=5620 host=127.0.0.1 > /dev/null 2>&1 &" > /tmp/ForwardRTPMainCamera.sh
+            echo "ionice -c 1 -n 4 nice -n -5 cat /var/run/openhd/videofifo2 | nice -n -5 gst-launch-1.0 fdsrc ! h264parse ! rtph264pay pt=96 config-interval=5 ! udpsink port=5620 host=127.0.0.1 > /dev/null 2>&1 &" > /tmp/ForwardRTPMainCamera.sh
         else
-            echo "ionice -c 1 -n 4 nice -n -10 socat -b ${VIDEO_UDP_BLOCKSIZE} GOPEN:/root/videofifo2 UDP4-SENDTO:127.0.0.1:5620 &" > /tmp/ForwardRTPMainCamera.sh
+            echo "ionice -c 1 -n 4 nice -n -10 socat -b ${VIDEO_UDP_BLOCKSIZE} GOPEN:/var/run/openhd/videofifo2 UDP4-SENDTO:127.0.0.1:5620 &" > /tmp/ForwardRTPMainCamera.sh
         fi
 
         chmod +x /tmp/ForwardRTPMainCamera.sh
@@ -68,8 +68,8 @@ function hotspot_check_function {
     #
     # Redirect telemetry to UDP splitter
     #
-    nice socat -b ${TELEMETRY_UDP_BLOCKSIZE} GOPEN:/root/telemetryfifo2 UDP4-SENDTO:127.0.0.1:6610 &
-    /home/pi/wifibroadcast-scripts/UDPsplitterhelper.sh 9122 6610 ${TELEMETRY_UDP_PORT} &
+    nice socat -b ${TELEMETRY_UDP_BLOCKSIZE} GOPEN:/var/run/openhd/telemetryfifo2 UDP4-SENDTO:127.0.0.1:6610 &
+    /usr/local/share/wifibroadcast-scripts/UDPsplitterhelper.sh 9122 6610 ${TELEMETRY_UDP_PORT} &
     
 
     #
@@ -84,27 +84,27 @@ function hotspot_check_function {
     #
     # TODO: use constants for all these ports
     #
-    nice /home/pi/wifibroadcast-base/rssi_forward 127.0.0.1 5003 &
-    /home/pi/wifibroadcast-scripts/UDPsplitterhelper.sh 9123 5003 5003 &
+    nice /usr/local/bin/rssi_forward 127.0.0.1 5003 &
+    /usr/local/share/wifibroadcast-scripts/UDPsplitterhelper.sh 9123 5003 5003 &
 
-    nice /home/pi/wifibroadcast-base/rssi_qgc_forward 127.0.0.1 5154 &
-    /home/pi/wifibroadcast-scripts/UDPsplitterhelper.sh 9124 5154 5154 &
+    nice /usr/local/bin/rssi_qgc_forward 127.0.0.1 5154 &
+    /usr/local/share/wifibroadcast-scripts/UDPsplitterhelper.sh 9124 5154 5154 &
 
 
     #
     # Distribute remote settings messages to connected hotspot devices
     # 
-    /home/pi/wifibroadcast-scripts/UDPsplitterhelper.sh 9125 5116 5115 &
+    /usr/local/share/wifibroadcast-scripts/UDPsplitterhelper.sh 9125 5116 5115 &
 
     #
     # Distribute Open.HD telemetry/rssi to QOpenHD when running on the ground station
     #
-    nice /home/pi/wifibroadcast-base/rssi_qgc_forward 127.0.0.1 5155 &
+    nice /usr/local/bin/rssi_qgc_forward 127.0.0.1 5155 &
 
 
     #if [ "$TELEMETRY_UPLINK" == "msp" ]; then
-        #cat /root/mspfifo > /dev/openhd_msp1 &
-        #ser2net
+        #cat /var/run/openhd/mspfifo > /dev/openhd_msp1 &
+        #ser2net -c /usr/local/etc/ser2net.conf
     #fi
 
 
@@ -123,20 +123,20 @@ function hotspot_check_function {
     if [ "$WIFI_HOTSPOT" != "N" ]; then
         detect_hardware
 
-        echo "Running on Pi model $MODEL with hotspot band $ABLE_BAND"
+        echo "Ground supports hotspot band(s): $ABLE_BAND"
 
         if [ "$ABLE_BAND" != "unknown" ]; then
-            echo "Setting up Hotspot..."
+            echo "Setting up WiFi hotspot..."
+            qstatus "Setting up WiFi hotspot" 5
 
             if [ "$WIFI_HOTSPOT" == "auto" ] && [ "$WIFI_HOTSPOT_NIC" == "internal" ]; then	
-                echo "wifihotspot auto..."
+                echo "Autoselecting WiFi hotspot band"
+                qstatus "Autoselecting WiFi hotspot band" 5
 
                 #
                 # Automatically choose a hotspot band that will not conflict with the Open.HD broadcast link
                 #
                 if [ "$ABLE_BAND" == "ag" ]; then
-                    echo "Dual Band capable..."
-
                     if [ "$FREQ" -gt "3000" ]; then
                         HOTSPOT_BAND=g
                         HOTSPOT_CHANNEL=7
@@ -145,14 +145,13 @@ function hotspot_check_function {
                         HOTSPOT_CHANNEL=36
                     fi
                 else
-                    echo "G Band only capable..."
-
                     HOTSPOT_BAND=g
 
                     if [ "$FREQ" -gt "3000" ]; then
                         HOTSPOT_CHANNEL=1
                     else
-                        echo "Hotspot disabled, you are using a 2.4Ghz Open.HD wifi card but your ground station only supports 2.4Ghz hotspot"	
+                        echo "Hotspot disabled due to WiFi card band mismatch"
+                        qstatus "Hotspot disabled due to WiFi card band mismatch" 5
                         return 1
                     fi
                 fi
@@ -166,8 +165,9 @@ function hotspot_check_function {
             sudo sed -i -e "s/hw_mode=$hw_mode/hw_mode=$HOTSPOT_BAND/g" /tmp/apconfig.txt
             sudo sed -i -e "s/channel=$channel/channel=$HOTSPOT_CHANNEL/g" /tmp/apconfig.txt
 
-            echo "setting up hotspot with mode $HOTSPOT_BAND on channel $HOTSPOT_CHANNEL"
-            tmessage "setting up hotspot with mode $HOTSPOT_BAND on channel $HOTSPOT_CHANNEL..."
+            echo "Hotspot running on band $HOTSPOT_BAND, channel $HOTSPOT_CHANNEL"
+            tmessage "Hotspot running on band $HOTSPOT_BAND, channel $HOTSPOT_CHANNEL"
+            qstatus "Hotspot running on band $HOTSPOT_BAND, channel $HOTSPOT_CHANNEL" 5
 
             #
             # Start a DHCP server and then configure access point management
@@ -184,8 +184,9 @@ function hotspot_check_function {
                 iw dev wifihotspot0 set txpower fixed 100
             fi
         else
-            echo "No hotspot capable hardware"
-            tmessage "No hotspot capable hardware"
+            echo "No WiFi hotspot capable hardware found"
+            tmessage "No WiFi hotspot capable hardware found"
+            qstatus "No WiFi hotspot capable hardware found" 5
         fi 
         
 

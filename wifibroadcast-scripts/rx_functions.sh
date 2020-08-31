@@ -2,11 +2,11 @@ function rx_function {
 
     if [ "${ENABLE_QOPENHD}" != "Y" ]; then
         if [ "${AdjustLCDBacklight}" == "Y" ]; then
-            /home/pi/wifibroadcast-misc/LCD/MouseListener ${AutoDimTime} ${AutoDimValue} /dev/input/event0 & > /dev/null 2>&1
+            /usr/local/bin/MouseListener ${AutoDimTime} ${AutoDimValue} /dev/input/event0 & > /dev/null 2>&1
         fi
     fi
 
-    /home/pi/wifibroadcast-base/sharedmem_init_rx
+    /usr/local/bin/sharedmem_init_rx
 
     #
     # Start virtual serial port for cmavnode and ser2net
@@ -75,6 +75,7 @@ function rx_function {
     
 
     if [ "${Bandwidth}" == "10" ]; then
+        qstatus "Using 10MHz channel bandwidth" 5
         echo "HardCode dirty code for tests only. Values are it Hex, to set 10MHz use 0xa (10 in dec)"
         echo 0xa > /sys/kernel/debug/ieee80211/phy0/ath9k_htc/chanbw
         echo 0xa > /sys/kernel/debug/ieee80211/phy1/ath9k_htc/chanbw
@@ -84,6 +85,7 @@ function rx_function {
     fi
 
     if [ "${Bandwidth}" == "5" ]; then
+        qstatus "Using 5MHz channel bandwidth" 5
         echo "HardCode dirty code for tests only. Values are it Hex, to set 10MHz use 0xa (10 in dec)"
         echo 5 > /sys/kernel/debug/ieee80211/phy0/ath9k_htc/chanbw
         echo 5 > /sys/kernel/debug/ieee80211/phy1/ath9k_htc/chanbw
@@ -139,6 +141,7 @@ function rx_function {
         touch /tmp/pausewhile
 
         tmessage "Saving to SD card enabled, preparing video storage"
+        qstatus "Saving video to SD card" 5
         
         tmessage "WARNING: SD card video saving may cause instability in the live video stream, this is temporary"
         
@@ -210,15 +213,18 @@ function rx_function {
         VIDEOFILE=/wbc_tmp/videotmp.raw
 
         echo "VIDEOFILE=/wbc_tmp/videotmp.raw" > /tmp/videofile
+
+        qstatus "Saving video to memory" 5
     else
         echo "Video save disabled"
+        qstatus "Saving video disabled" 5
     fi
 
 
     #
     # Tracker disabled temporarily
     #
-    #/home/pi/wifibroadcast-base/tracker /wifibroadcast_rx_status_0 >> /wbc_tmp/tracker.txt &
+    #/usr/local/bin//tracker /wifibroadcast_rx_status_0 >> /wbc_tmp/tracker.txt &
     #sleep 1
 
     killall wbc_status > /dev/null 2>&1
@@ -231,6 +237,7 @@ function rx_function {
 
         
         echo "AiroDump is enabled, running airodump-ng for ${AIRODUMP_SECONDS} seconds ..."
+        qstatus "AiroDump is enabled, running airodump-ng for ${AIRODUMP_SECONDS} seconds ..." 5
         
         sleep 3
         
@@ -260,7 +267,7 @@ function rx_function {
         #
         # Use raspi2png to take a screenshot of the rendered airodump display
         #
-        ionice -c 3 nice -n 19 /home/pi/wifibroadcast-misc/raspi2png -p /wbc_tmp/airodump.png >> /dev/null
+        ionice -c 3 nice -n 19 /usr/bin/raspi2png -p /wbc_tmp/airodump.png >> /dev/null
         killall airodump-ng
         
         sleep 1
@@ -323,6 +330,8 @@ function rx_function {
             echo "  | Either your power-supply or wiring is not sufficent, check the wiring instructions in the Wiki! |"
             echo "  ---------------------------------------------------------------------------------------------------"
             
+            qstatus "ERROR: Undervoltage detected, check power supply" 3
+
             UNDERVOLT=1
 
             echo "1" > /tmp/undervolt
@@ -376,12 +385,12 @@ function rx_function {
 
         #if [ "$ENABLE_QOPENHD" == "Y" ]; then
         #	if [ "$FORWARD_STREAM" == "rtp" ]; then
-        #		ionice -c 1 -n 4 nice -n -10 cat /root/videofifo1 | ionice -c 1 -n 4 nice -n -10 gst-launch-1.0 fdsrc ! h264parse ! rtph264pay pt=96 config-interval=5 ! udpsink port=$VIDEO_UDP_PORT host=127.0.0.1 &
+        #		ionice -c 1 -n 4 nice -n -10 cat /var/run/openhd/videofifo1 | ionice -c 1 -n 4 nice -n -10 gst-launch-1.0 fdsrc ! h264parse ! rtph264pay pt=96 config-interval=5 ! udpsink port=$VIDEO_UDP_PORT host=127.0.0.1 &
         #	else
-        #		ionice -c 1 -n 4 nice -n -10 cat /root/videofifo1 | ionice -c 1 -n 4 nice -n -10 gst-launch-1.0 fdsrc ! udpsink port=$VIDEO_UDP_PORT host=127.0.0.1 &
+        #		ionice -c 1 -n 4 nice -n -10 cat /var/run/openhd/videofifo1 | ionice -c 1 -n 4 nice -n -10 gst-launch-1.0 fdsrc ! udpsink port=$VIDEO_UDP_PORT host=127.0.0.1 &
         #	fi
         #else
-            ionice -c 1 -n 4 nice -n -10 cat /root/videofifo1 | ionice -c 1 -n 4 nice -n -10 $DISPLAY_PROGRAM ${HELLO_VIDEO_ARGS} > /dev/null 2>&1 &
+            ionice -c 1 -n 4 nice -n -10 cat /var/run/openhd/videofifo1 | ionice -c 1 -n 4 nice -n -10 $DISPLAY_PROGRAM ${HELLO_VIDEO_ARGS} > /dev/null 2>&1 &
         #fi
 
 
@@ -389,7 +398,7 @@ function rx_function {
         # Start saving video if one of the saving modes is enabled
         #
         if [ "$VIDEO_TMP" != "none" ]; then
-            ionice -c 3 nice cat /root/videofifo3 >> $VIDEOFILE &
+            ionice -c 3 nice cat /var/run/openhd/videofifo3 >> $VIDEOFILE &
         fi
 
         #
@@ -399,8 +408,8 @@ function rx_function {
         # that something is not setting up the interface or treating it like it's just another ground interface
         #
         if [ "$RELAY" == "Y" ]; then
-            /root/wifibroadcast/sharedmem_init_tx
-            ionice -c 1 -n 4 nice -n -10 cat /root/videofifo4 | /home/pi/wifibroadcast-base/tx_rawsock -p 0 -b $RELAY_VIDEO_BLOCKS -r $RELAY_VIDEO_FECS -f $RELAY_VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d 24 -y 0 relay0 > /dev/null 2>&1 &
+            /usr/local/bin/sharedmem_init_tx
+            ionice -c 1 -n 4 nice -n -10 cat /var/run/openhd/videofifo4 | /usr/local/bin/tx_rawsock -p 0 -b $RELAY_VIDEO_BLOCKS -r $RELAY_VIDEO_FECS -f $RELAY_VIDEO_BLOCKLENGTH -t $VIDEO_FRAMETYPE -d 24 -y 0 relay0 > /dev/null 2>&1 &
         fi
 
 
@@ -409,33 +418,38 @@ function rx_function {
         #
         NICS=`ls /sys/class/net/ | nice grep -v eth0 | nice grep -v lo | nice grep -v usb | nice grep -v intwifi | nice grep -v wlan | nice grep -v relay | nice grep -v wifihotspot`
 
-        tmessage "Starting RX (FEC: $VIDEO_BLOCKS/$VIDEO_FECS/$VIDEO_BLOCKLENGTH)"
-        
+        tmessage "Starting video RX, FEC: $VIDEO_BLOCKS/$VIDEO_FECS/$VIDEO_BLOCKLENGTH"
+        qstatus "Starting video RX" 5
+        qstatus "FEC: $VIDEO_BLOCKS/$VIDEO_FECS/$VIDEO_BLOCKLENGTH" 5
+
         #
         # Start audio and remote settings
         #
         if [ $IsFirstTime -eq 0 ]; then
             if [ "$IsAudioTransferEnabled" == "1" ]; then
                 echo "Audio enabled"
+                qstatus "Audio enabled" 5
 
                 amixer cset numid=3 $DefaultAudioOut
 
-                /home/pi/RemoteSettings/Ground/AudioPlayback.sh &
-                /home/pi/RemoteSettings/Ground/RxAudio.sh &
+                /usr/local/share/RemoteSettings/Ground/AudioPlayback.sh &
+                /usr/local/share/RemoteSettings/Ground/RxAudio.sh &
             fi
 
             if [ "$RemoteSettingsEnabled" != "0" ]; then
                 echo "Remote settings enabled"
+                qstatus "Remote settings enabled" 5
 
-                /home/pi/RemoteSettings/ipchecker/iphelper.sh > /dev/null 2>&1 &
-                /usr/bin/python3 /home/pi/RemoteSettings/RemoteSettings.py > /dev/null 2>&1 &
-                /home/pi/RemoteSettings/RemoteSettingsWFBC_UDP.sh > /dev/null 2>&1 &
-                /home/pi/RemoteSettings/GroundRSSI.sh &
+                /usr/local/share/RemoteSettings/ipchecker/iphelper.sh > /dev/null 2>&1 &
+                /usr/bin/python3 /usr/local/share/RemoteSettings/RemoteSettings.py > /dev/null 2>&1 &
+                /usr/local/share/RemoteSettings/RemoteSettingsWFBC_UDP.sh > /dev/null 2>&1 &
+                /usr/local/share/RemoteSettings/GroundRSSI.sh &
             fi
             
             #if [ "$IsBandSwicherEnabled" == "1" ]; then
                 echo "Band switcher enabled"
-                /home/pi/RemoteSettings/BandSwitcher.sh &
+                qstatus "Band switcher enabled" 5
+                /usr/local/share/RemoteSettings/BandSwitcher.sh &
             #fi
         fi
     
@@ -448,9 +462,9 @@ function rx_function {
         # This will be merged into the new ground recording system
         #
         if [ "$VIDEO_TMP" != "none" ]; then
-            ionice -c 1 -n 3 /home/pi/wifibroadcast-base/rx -p 0 -d 1 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH $NICS | ionice -c 1 -n 4 nice -n -10 tee >(ionice -c 1 -n 4 nice -n -10 /home/pi/wifibroadcast-misc/ftee /root/videofifo2 > /dev/null 2>&1) >(ionice -c 1 nice -n -10 /home/pi/wifibroadcast-misc/ftee /root/videofifo4 > /dev/null 2>&1) >(ionice -c 3 nice /home/pi/wifibroadcast-misc/ftee /root/videofifo3 > /dev/null 2>&1) | ionice -c 1 -n 4 nice -n -10 /home/pi/wifibroadcast-misc/ftee /root/videofifo1 > /dev/null 2>&1
+            ionice -c 1 -n 3 /usr/local/bin/rx -p 0 -d 1 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH $NICS | ionice -c 1 -n 4 nice -n -10 tee >(ionice -c 1 -n 4 nice -n -10 /usr/local/bin/ftee /var/run/openhd/videofifo2 > /dev/null 2>&1) >(ionice -c 1 nice -n -10 /usr/local/bin/ftee /var/run/openhd/videofifo4 > /dev/null 2>&1) >(ionice -c 3 nice /usr/local/bin/ftee /var/run/openhd/videofifo3 > /dev/null 2>&1) | ionice -c 1 -n 4 nice -n -10 /usr/local/bin/ftee /var/run/openhd/videofifo1 > /dev/null 2>&1
         else
-            ionice -c 1 -n 3 /home/pi/wifibroadcast-base/rx -p 0 -d 1 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH $NICS | ionice -c 1 -n 4 nice -n -10 tee >(ionice -c 1 -n 4 nice -n -10 /home/pi/wifibroadcast-misc/ftee /root/videofifo2 > /dev/null 2>&1) >(ionice -c 1 nice -n -10 /home/pi/wifibroadcast-misc/ftee /root/videofifo4 > /dev/null 2>&1) | ionice -c 1 -n 4 nice -n -10 /home/pi/wifibroadcast-misc/ftee /root/videofifo1 > /dev/null 2>&1
+            ionice -c 1 -n 3 /usr/local/bin/rx -p 0 -d 1 -b $VIDEO_BLOCKS -r $VIDEO_FECS -f $VIDEO_BLOCKLENGTH $NICS | ionice -c 1 -n 4 nice -n -10 tee >(ionice -c 1 -n 4 nice -n -10 /usr/local/bin/ftee /var/run/openhd/videofifo2 > /dev/null 2>&1) >(ionice -c 1 nice -n -10 /usr/local/bin/ftee /var/run/openhd/videofifo4 > /dev/null 2>&1) | ionice -c 1 -n 4 nice -n -10 /usr/local/bin/ftee /var/run/openhd/videofifo1 > /dev/null 2>&1
         fi
 
 
@@ -462,7 +476,7 @@ function rx_function {
             ps -ef | nice grep "$DISPLAY_PROGRAM" | nice grep -v grep | awk '{print $2}' | xargs kill -9
         #fi
         ps -ef | nice grep "rx -p 0" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-        ps -ef | nice grep "ftee /root/videofifo" | nice grep -v grep | awk '{print $2}' | xargs kill -9
-        ps -ef | nice grep "cat /root/videofifo" | nice grep -v grep | awk '{print $2}' | xargs kill -9
+        ps -ef | nice grep "ftee /var/run/openhd/videofifo" | nice grep -v grep | awk '{print $2}' | xargs kill -9
+        ps -ef | nice grep "cat /var/run/openhd/videofifo" | nice grep -v grep | awk '{print $2}' | xargs kill -9
     done
 }
